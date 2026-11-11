@@ -2,8 +2,9 @@ import { Pool } from 'pg';
 import { aplicarMigraciones } from '../../src/scripts/migrar';
 import { crearTenant } from '../../src/scripts/crearTenant';
 import { registrarAuditoria } from '../../src/rest/auditoria';
+import { describeConBase } from '../setup/conBaseDeTest';
 
-describe('registrarAuditoria', () => {
+describeConBase('registrarAuditoria', () => {
   const pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
 
   beforeAll(async () => { await aplicarMigraciones(pool); });

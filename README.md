@@ -45,9 +45,11 @@ con su propia credencial y su propia sesión (cookie jar independiente).
 tributaria, que corre por navegador. Al terminar el login, las cookies del
 navegador se exportan al cookie jar que usan las tools que consultan por HTTP
 (`sii_bhe_*`, `sii_rcv_*`, `sii_dte_*`, `sii_renta_*`, `sii_mipyme_list_*`),
-así que una sesión abierta con clave también las habilita. Lo único que exige
-certificado digital es **firmar** (emitir DTE): la clave autentica, pero no
-firma.
+así que una sesión abierta con clave también las habilita. **Firmar** (emitir
+DTE) exige un certificado digital, pero no el archivo en esta máquina: firma el
+SII con el certificado que el titular tiene cargado allá (centralizado), y lo
+que hay que configurar es la clave de ese certificado, `SII_CERT_CLAVE_SII`.
+Con ella alcanza una sesión abierta con clave tributaria.
 
 ### Clave desde el Llavero de macOS
 
@@ -597,9 +599,23 @@ empresa en el portal.
 ## Facturar por lote desde un CSV
 
 `npm run facturar` emite un lote de documentos en el portal de Facturación Gratuita y baja
-el PDF de cada uno. Corre local, con el perfil `certificado` del `.env` (`SII_CERT_PATH`,
-`SII_CERT_PASSWORD`, `SII_CERT_RUT`) más `SII_CERT_CLAVE_SII`, y `SII_EMPRESA_RUT` (o
-`--empresa`) si el titular opera más de una empresa.
+el PDF de cada uno. Corre local. En el `.env`:
+
+```bash
+# Quien firma: la PERSONA que tiene el certificado digital cargado en el SII.
+SII_MIPYME_RUT=11111111-1
+SII_MIPYME_CLAVE=claveTributaria
+# La clave de ese certificado centralizado. Es lo único que la firma necesita.
+SII_CERT_CLAVE_SII=claveDelCertCargadoEnElSii
+# La empresa emisora, si esa persona opera más de una (o --empresa).
+SII_EMPRESA_RUT=22222222-2
+```
+
+El archivo `.pfx` **no hace falta**: firma el SII con el certificado centralizado. Entrar
+con clave tributaria usa el navegador (`agent-browser` instalado globalmente, ver
+Requisitos). Si preferís entrar con el `.pfx`, configurá `SII_CERT_PATH`,
+`SII_CERT_PASSWORD` y `SII_CERT_RUT` en vez de las dos `SII_MIPYME_*`; con las dos formas
+configuradas se usa el `.pfx`, y `--perfil mipyme|certificado` fuerza una.
 
 ```bash
 npm run facturar -- verificar-firma lote.csv     # firma el primer documento SIN emitir
@@ -695,6 +711,12 @@ Los dos códigos con "no" que podrían confundirse:
   `ERROR`: el consumidor reintentaba en loop algo que nunca iba a funcionar.
 
 ## Desarrollo
+
+`npm test` consigue solo la base Postgres que necesitan las suites de infra
+(`tests/db`, `tests/rest`, `tests/restServer`): usa `TEST_DATABASE_URL` si está definida, si
+no la de `docker-compose.test.yml` (la levanta si Docker está abierto), y si no un Postgres
+instalado en la máquina, en un cluster temporal. Sin ninguna de las tres, esas suites se
+saltan con un aviso; en CI fallan en vez de saltarse.
 
 ```bash
 npm test          # correr tests

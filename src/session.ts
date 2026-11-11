@@ -413,18 +413,30 @@ export class SessionManager {
     // se reescribe completo en cada login, y su ruta es por RUT.
   }
 
-  // Lo que SÍ exige certificado digital: firmar. El SII no acepta una clave
-  // tributaria para emitir un DTE, porque la firma electrónica avanzada sale del
-  // certificado. Se separa del jar a propósito — son dos capacidades distintas y
-  // confundirlas fue lo que dejó las consultas bloqueadas para clave sin motivo.
+  // Firmar exige un certificado digital, pero NO el archivo local: el portal
+  // mipyme firma del lado servidor con el certificado que el contribuyente tiene
+  // cargado EN EL SII (centralizado), y lo único que pide es la clave de ese
+  // certificado. Es lo que hace cualquiera en el navegador: entra con su clave
+  // tributaria y al firmar escribe la clave del certificado.
+  //
+  // Por eso alcanza con una de dos:
+  //   - la clave del certificado centralizado (SII_CERT_CLAVE_SII), con la
+  //     sesión abierta por clave tributaria O por certificado; o
+  //   - el certificado local (compatibilidad: antes era la única forma, y el
+  //     scraper igual pide la clave del centralizado más adelante).
+  //
+  // Antes exigía el .pfx local sí o sí, con el argumento "la clave autentica
+  // pero no firma". Es cierto, y no implica el archivo: quien firma es el SII.
+  // Que el titular tenga certificado centralizado y que la clave sea la correcta
+  // lo comprueba `verificarFirma` contra el portal, sin emitir.
   assertPuedeFirmar(): void {
-    if (this.config.strategy !== AuthStrategy.Certificate) {
-      throw new RequiereCertificado(
-        'Firmar documentos tributarios requiere certificado digital: la clave ' +
-        'tributaria autentica, pero no firma. Configurá SII_CERT_PATH y ' +
-        'SII_CERT_PASSWORD.'
-      );
-    }
+    if (this.config.strategy === AuthStrategy.Certificate) return;
+    if (this.config.claveCertificadoSii) return;
+    throw new RequiereCertificado(
+      'Firmar documentos tributarios requiere certificado digital: la clave ' +
+      'tributaria autentica, pero no firma. Configurá SII_CERT_CLAVE_SII (la clave del ' +
+      'certificado que tenés cargado en el SII) o, si no, SII_CERT_PATH y SII_CERT_PASSWORD.'
+    );
   }
 
   // Los CGI de BHE y las APIs del portal esperan el RUT partido en cuerpo y

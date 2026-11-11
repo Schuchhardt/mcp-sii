@@ -1,7 +1,8 @@
 import { Pool } from 'pg';
 import { aplicarMigraciones } from '../../src/scripts/migrar';
+import { describeConBase } from '../setup/conBaseDeTest';
 
-describe('aplicarMigraciones', () => {
+describeConBase('aplicarMigraciones', () => {
   const pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
 
   // No se borran las tablas acá: la base de test es compartida entre todos los

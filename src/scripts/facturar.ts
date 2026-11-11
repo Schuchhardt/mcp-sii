@@ -7,7 +7,7 @@ import { SiiHttpClient } from '../http';
 import {
   MipymeHttpScraper, EmitirDteParams, EmisionIncierta, DteDuplicadoProbable,
 } from '../scrapers/mipymeHttp';
-import { perfil } from '../perfilesVerificacion';
+import { perfil, perfilesDisponibles, NombrePerfil } from '../perfilesVerificacion';
 import { leerLote, DocumentoLote } from '../emision/lote';
 import {
   RegistroEmisiones, emitirConRegistro, EmisionPendienteDeRevision,
@@ -26,9 +26,16 @@ import {
 // Opciones: --empresa <rut-dv> (o SII_EMPRESA_RUT), --dir <carpeta> (default
 // ./emisiones), --solo <clave>, --permitir-duplicado.
 //
-// Credenciales: el perfil `certificado` del .env (SII_CERT_PATH,
-// SII_CERT_PASSWORD, SII_CERT_RUT) y SII_CERT_CLAVE_SII, la clave del
-// certificado cargado en el SII.
+// Credenciales (.env). La firma la hace el SII con el certificado CENTRALIZADO
+// del titular, así que el .pfx local es opcional:
+//
+//   SII_CERT_CLAVE_SII               clave del certificado cargado en el SII (siempre)
+//   SII_MIPYME_RUT + SII_MIPYME_CLAVE  entrar con clave tributaria (sin .pfx), o
+//   SII_CERT_PATH + SII_CERT_PASSWORD + SII_CERT_RUT   entrar con el .pfx local
+//
+// El RUT es el de la PERSONA dueña del certificado centralizado: es quien firma.
+// Con las dos formas configuradas se usa el .pfx; --perfil mipyme|certificado
+// fuerza una.
 
 interface Args { comando: string; posicionales: string[]; opciones: Record<string, string | true> }
 
@@ -36,7 +43,7 @@ function leerArgs(argv: string[]): Args {
   const [comando = '', ...resto] = argv;
   const posicionales: string[] = [];
   const opciones: Record<string, string | true> = {};
-  const conValor = new Set(['empresa', 'dir', 'solo', 'folio', 'codigo', 'o']);
+  const conValor = new Set(['empresa', 'dir', 'solo', 'folio', 'codigo', 'o', 'perfil']);
   for (let i = 0; i < resto.length; i++) {
     const a = resto[i];
     if (a.startsWith('-')) {
@@ -52,13 +59,26 @@ function leerArgs(argv: string[]): Args {
 
 const pesos = (n: number) => `$${n.toLocaleString('es-CL')}`;
 
-function sesiones() {
-  const p = perfil('certificado');
-  if (p.credencial.tipo !== 'certificado') throw new Error('El perfil certificado no trae certificado.');
+export function elegirPerfil(pedido: string | undefined, disponibles: NombrePerfil[]): NombrePerfil {
+  if (pedido !== undefined) {
+    if (pedido !== 'mipyme' && pedido !== 'certificado') throw new Error('--perfil debe ser mipyme o certificado.');
+    return pedido;
+  }
+  if (disponibles.includes('certificado')) return 'certificado';
+  // Sin .pfx local se entra con clave tributaria. Si tampoco está configurada,
+  // `perfil('mipyme')` falla diciendo qué variables faltan.
+  return 'mipyme';
+}
+
+function sesiones(perfilPedido?: string) {
+  const p = perfil(elegirPerfil(perfilPedido, perfilesDisponibles()));
+  const claveCert = process.env.SII_CERT_CLAVE_SII || undefined;
   const cred = new ProveedorCredencialesRuntime();
-  cred.guardarCertificado(
-    p.rut, p.credencial.certificadoBase64, p.credencial.certificadoPassword, process.env.SII_CERT_CLAVE_SII
-  );
+  if (p.credencial.tipo === 'certificado') {
+    cred.guardarCertificado(p.rut, p.credencial.certificadoBase64, p.credencial.certificadoPassword, claveCert);
+  } else {
+    cred.guardar(p.rut, p.credencial.clave, claveCert);
+  }
   const registro = crearRegistroSesionesSii(cred);
   const conScraper = <R>(fn: (s: MipymeHttpScraper) => Promise<R>): Promise<R> =>
     registro.ejecutar(p.rut, async sesion => fn(new MipymeHttpScraper(new SiiHttpClient(sesion), sesion)));
@@ -119,7 +139,7 @@ async function main() {
   if (comando === 'pdf') {
     const [codigo] = posicionales;
     if (!codigo) throw new Error('Uso: pdf <codigo> [-o archivo.pdf]');
-    const { conScraper } = sesiones();
+    const { conScraper } = sesiones(opciones.perfil as string | undefined);
     const pdf = await conScraper(s => s.dtePdf(codigo, empresa));
     const destino = (opciones.o as string | undefined) ?? path.join(dir, 'pdf', `dte-${codigo}.pdf`);
     fs.mkdirSync(path.dirname(destino), { recursive: true });
@@ -130,7 +150,7 @@ async function main() {
 
   if (comando === 'verificar-firma') {
     const docs = cargarLote(posicionales[0], empresa, opciones.solo as string | undefined);
-    const { rut, conScraper } = sesiones();
+    const { rut, conScraper } = sesiones(opciones.perfil as string | undefined);
     console.log(`Firmando (SIN emitir) el documento "${docs[0].clave}" como ${rut}...`);
     const r = await conScraper(s => s.verificarFirma(docs[0].params));
     console.log(`${r.firmaValida ? 'OK' : 'FALLÓ'}: ${r.detalle}`);
@@ -140,7 +160,7 @@ async function main() {
 
   if (comando === 'preview') {
     const docs = cargarLote(posicionales[0], empresa, opciones.solo as string | undefined);
-    const { conScraper } = sesiones();
+    const { conScraper } = sesiones(opciones.perfil as string | undefined);
     let neto = 0, iva = 0, total = 0, fallas = 0;
     console.log('PREVISUALIZACIÓN: montos calculados por el SII. No se emite nada.\n');
     for (const d of docs) {
@@ -170,7 +190,7 @@ async function main() {
       console.log(`Esto EMITIRÍA ${docs.length} documento(s) tributario(s) reales e irreversibles. Corré primero "preview" y después repetí con --confirmar.`);
       process.exit(1);
     }
-    const { conScraper } = sesiones();
+    const { conScraper } = sesiones(opciones.perfil as string | undefined);
     const permitirDuplicado = opciones['permitir-duplicado'] === true;
     let emitidos = 0, saltados = 0, fallas = 0;
 
@@ -226,4 +246,4 @@ async function main() {
   process.exit(comando ? 1 : 0);
 }
 
-main().catch(e => { console.error('ERROR:', e?.constructor?.name, '-', e?.message ?? e); process.exit(1); });
+if (require.main === module) main().catch(e => { console.error('ERROR:', e?.constructor?.name, '-', e?.message ?? e); process.exit(1); });

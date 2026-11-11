@@ -3,8 +3,9 @@ import { aplicarMigraciones } from '../../src/scripts/migrar';
 import { crearTenant } from '../../src/scripts/crearTenant';
 import { autenticarTenant } from '../../src/rest/auth';
 import { hashApiKey } from '../../src/rest/apiKeyFormato';
+import { describeConBase } from '../setup/conBaseDeTest';
 
-describe('autenticarTenant', () => {
+describeConBase('autenticarTenant', () => {
   const pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
 
   beforeAll(async () => { await aplicarMigraciones(pool); });

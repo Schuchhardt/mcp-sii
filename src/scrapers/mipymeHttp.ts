@@ -2729,8 +2729,10 @@ export class MipymeHttpScraper {
       );
     }
     this.session.assertPuedeEntregarCookieJar();
-    // Emitir de verdad exige certificado: la clave tributaria autentica pero no
-    // firma, y la firma electrónica avanzada sale del certificado.
+    // Emitir de verdad exige poder firmar: la clave tributaria autentica pero
+    // no firma. Firma el SII con el certificado centralizado del titular, así
+    // que lo que se exige es la clave de ESE certificado (o, por
+    // compatibilidad, una sesión abierta con el certificado local).
     //
     // Este chequeo es imprescindible desde que `assertPuedeEntregarCookieJar`
     // dejó de exigir certificado (ahora la clave también produce el jar). Sin

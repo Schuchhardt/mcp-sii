@@ -13,4 +13,8 @@ module.exports = {
   // que un archivo borre filas que otro insertó a mitad de su test. La suite
   // es rápida (segundos), así que correr en serie no cuesta nada real.
   maxWorkers: 1,
+  // Consigue una base Postgres para las suites de infra (o las salta con
+  // aviso si no hay cómo). Ver tests/setup/baseDeTest.ts.
+  globalSetup: '<rootDir>/tests/setup/baseDeTest.ts',
+  globalTeardown: '<rootDir>/tests/setup/cerrarBaseDeTest.ts',
 };

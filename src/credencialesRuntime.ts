@@ -11,11 +11,15 @@ import { rutaTemporalSii } from './rutaTemporalSii';
 export class ProveedorCredencialesRuntime implements ProveedorCredenciales {
   private porRut = new Map<string, SiiConfig>();
 
-  guardar(rut: string, clave: string): void {
+  // `claveCertSii` es la clave del certificado CENTRALIZADO (el cargado en el
+  // SII). Con ella una sesión abierta con clave tributaria puede firmar DTE en
+  // el portal mipyme sin tener el .pfx en esta máquina.
+  guardar(rut: string, clave: string, claveCertSii?: string): void {
     this.porRut.set(normalizar(rut), {
       rut,
       clave,
       strategy: AuthStrategy.Clave,
+      claveCertificadoSii: claveCertSii,
     });
   }
 
