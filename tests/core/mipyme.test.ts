@@ -32,7 +32,7 @@ describe('core/mipyme', () => {
     (MockScraper.prototype.emitirDte as jest.Mock).mockResolvedValue({ emitido: false, resumen: {} });
     const params = { empresaRut: '22222222-2' } as any;
     await emitirDte(registroQueEjecuta(), '11.111.111-1', params, false);
-    expect(MockScraper.prototype.emitirDte).toHaveBeenCalledWith(params, false);
+    expect(MockScraper.prototype.emitirDte).toHaveBeenCalledWith(params, false, {});
   });
 
   describe('guardarBorrador — idempotencia anti-doble-click', () => {

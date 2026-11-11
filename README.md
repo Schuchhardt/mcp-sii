@@ -565,8 +565,9 @@ quien ya usaba estas tools:
   certificado digital.** Antes corrían por navegador y aceptaban clave tributaria.
   El camino HTTP necesita el archivo de cookies que sólo produce la autenticación
   con certificado, igual que el resto de las consultas. Fallan de entrada, con el
-  mensaje que dice qué configurar. `sii_mipyme_emitir_dte` sigue por navegador y
-  sigue aceptando clave.
+  mensaje que dice qué configurar. `sii_mipyme_emitir_dte` también va por HTTP
+  desde el 2026-08-11: previsualiza con clave o certificado, y para firmar exige
+  certificado.
 - **`limit` ya no existe en `sii_mipyme_list_dte_emitidos`: se reemplaza por
   `pagina`.** El CGI entrega de a 100 documentos por página y recortar del lado
   del cliente escondía que había más. La respuesta ahora informa `pagina` y
@@ -578,16 +579,74 @@ empresa en el portal.
 
 ### Advertencias
 
-- **`sii_mipyme_emitir_dte` está probablemente inoperativa.** Apunta a `mipeDocAlta.cgi`,
-  que responde 404 (medido el 2026-08-03). La ruta del portal es
-  `mipeLaunchPage.cgi?OPCION=<tipo>&TIPO=4`, pero no se corrigió sin relevar antes el
-  formulario que sirve: apuntarla a ciegas convertiría un fallo visible en un camino que
-  emite documentos tributarios reales con parámetros adivinados.
+- **La emisión de `sii_mipyme_emitir_dte` todavía no se ejercitó contra el SII real.**
+  El camino completo está implementado por HTTP (seis pasos, ver
+  [el contrato](docs/superpowers/specs/2026-08-11-mipyme-emision-contrato.md)) y la
+  previsualización está verificada en vivo, pero no hay ninguna emisión confirmada: la
+  respuesta de `mipeSendXML.cgi` no está relevada. Por eso el éxito **no** se lee de esa
+  respuesta: tras enviar se busca la fila nueva en el historial de emitidos, y de ahí salen el
+  folio real y el `codigo`. Si la fila no aparece, la tool falla con `EmisionIncierta` en vez
+  de afirmar que emitió. La primera emisión real conviene hacerla por un monto mínimo y
+  anularla con nota de crédito.
 - **`sii_dte_*` y `sii_rcv_*` no son comparables.** Responden preguntas distintas y sus
   cifras no cuadran: Consultas DTE incluye guías de despacho, clasifica las facturas de
   compra del lado emitido, y sus recibidos difieren de los del RCV. Ninguno está mal.
 - **Cada aplicación del SII tiene su propia lista de empresas autorizadas.** La de
   `sii_mipyme_list_empresas` no coincide con la que habilitan el RCV o Consultas DTE.
+
+## Facturar por lote desde un CSV
+
+`npm run facturar` emite un lote de documentos en el portal de Facturación Gratuita y baja
+el PDF de cada uno. Corre local, con el perfil `certificado` del `.env` (`SII_CERT_PATH`,
+`SII_CERT_PASSWORD`, `SII_CERT_RUT`) más `SII_CERT_CLAVE_SII`, y `SII_EMPRESA_RUT` (o
+`--empresa`) si el titular opera más de una empresa.
+
+```bash
+npm run facturar -- verificar-firma lote.csv     # firma el primer documento SIN emitir
+npm run facturar -- preview lote.csv             # montos calculados por el SII; no emite
+npm run facturar -- emitir lote.csv --confirmar  # EMITE: real e irreversible
+npm run facturar -- estado                       # registro local de emisiones
+npm run facturar -- pdf <codigo>                 # baja el PDF de un emitido
+```
+
+El CSV lleva una fila por documento (una línea de detalle). Hay un ejemplo en
+[`docs/ejemplos/lote-facturas.csv`](docs/ejemplos/lote-facturas.csv):
+
+| Columna | |
+|---|---|
+| `clave` | Identificador único del documento, por ejemplo `2026-10:12345678-9`. Es lo que impide emitirlo dos veces |
+| `receptor_rut` | Con dígito verificador |
+| `razon_social`, `giro`, `direccion`, `comuna` | Del receptor. `ciudad` es opcional (se usa la comuna) |
+| `item` | Nombre del ítem, máximo 25 caracteres (límite del portal) |
+| `descripcion` | Opcional. Glosa extendida, hasta 1000 caracteres |
+| `neto` | Monto sin IVA, entero |
+| `tipo_dte`, `cantidad`, `fecha_emision`, `forma_pago` | Opcionales: 33, 1, hoy y crédito por defecto |
+| `ref_tipo_doc`, `ref_folio`, `ref_fecha`, `ref_razon`, `ref_codigo` | Referencia; obligatoria en nota de crédito (61) |
+
+Los archivos `*.lote.csv` y la carpeta `emisiones/` están en `.gitignore`: son datos
+tributarios reales.
+
+**Cómo evita duplicados.** Son dos defensas independientes:
+
+1. **El historial del portal.** Antes de firmar se consulta si ya existe un documento del
+   mismo tipo, receptor, fecha y monto. Si existe, no emite (`DteDuplicadoProbable`), salvo
+   con `--permitir-duplicado`.
+2. **El registro local** (`emisiones/registro.json`). Cada `clave` se reserva antes de tocar
+   el SII. Una clave ya emitida se salta; una que quedó a medias o incierta **bloquea** y
+   detiene el lote.
+
+**Cuando una emisión queda incierta** (se cortó la red durante el envío, o el documento no
+aparece en el historial) el script no reintenta nunca. Hay que mirar el historial de
+emitidos en el portal y resolver a mano:
+
+```bash
+npm run facturar -- resolver <clave> emitido --folio 123 --codigo 987654   # sí salió
+npm run facturar -- resolver <clave> descartar                             # no salió
+```
+
+**La descripción extendida no está relevada en vivo.** Se envía como lo hace el formulario
+(`DESCRIP_nn` + `EFXP_DSC_ITEM_nn`) y se comprueba en la previsualización que el SII la
+conservó: si no, falla ahí, antes de firmar. `preview` alcanza para saber si funciona.
 
 ## Adaptador REST: contrato de errores
 

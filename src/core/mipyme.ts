@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { MipymeHttpScraper, BorradorMipyme, FiltrosDteEmitidos, DteEmitidosResult, FiltrosDteRecibidos, DteRecibidosResult, EmitirDteParams, PrevisualizacionDte, DteEmitido, BorradorGuardado, FiltrosRespaldoXml, RespaldoXmlResult } from '../scrapers/mipymeHttp';
+import { MipymeHttpScraper, OpcionesEmision, BorradorMipyme, FiltrosDteEmitidos, DteEmitidosResult, FiltrosDteRecibidos, DteRecibidosResult, EmitirDteParams, PrevisualizacionDte, DteEmitido, BorradorGuardado, FiltrosRespaldoXml, RespaldoXmlResult } from '../scrapers/mipymeHttp';
 import { SiiHttpClient } from '../http';
 import { SessionManager, Empresa } from '../session';
 import { EjecutorSesion } from '../registroSesiones';
@@ -85,11 +85,12 @@ export async function emitirDte(
   ejecutor: EjecutorSesion<SessionManager>,
   rut: string,
   params: EmitirDteParams,
-  confirmar: boolean
+  confirmar: boolean,
+  opciones: OpcionesEmision = {}
 ): Promise<PrevisualizacionDte | DteEmitido> {
   return ejecutor.ejecutar(rut, async sesion => {
     const http = new MipymeHttpScraper(new SiiHttpClient(sesion), sesion);
-    return http.emitirDte(params, confirmar);
+    return http.emitirDte(params, confirmar, opciones);
   });
 }
 

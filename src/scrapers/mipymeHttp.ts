@@ -702,7 +702,14 @@ export interface LineaDteMipyme {
   cantidad: number;
   precioUnitario: number;
   unidad?: string;
+  // Descripción extendida del ítem (la columna "Descrip." del portal). El
+  // nombre admite 25 caracteres; una glosa real ("Comisión por administración
+  // de arriendo temporal – Octubre 2026 – …") no cabe ahí y va acá.
+  descripcion?: string;
 }
+
+// Tope de DscItem en el esquema de DTE del SII.
+export const MAX_DESCRIPCION_ITEM = 1000;
 
 export interface TotalesDte {
   subtotales: number[];
@@ -930,8 +937,50 @@ export interface PrevisualizacionDte {
 
 export interface DteEmitido {
   emitido: true;
+  // El folio REAL: el de la fila del historial del portal, leído después de
+  // enviar. No es el propuesto por la página de firma.
   folio: number;
+  // El `codigo` de esa fila: lo que pide `dtePdf` para bajar el PDF.
+  codigo: string;
+  // El que propuso la página de firma. Se conserva para diagnóstico: si difiere
+  // de `folio`, otro documento tomó el propuesto entre la firma y el envío.
+  folioPropuesto: number;
   resumen: ResumenDte;
+}
+
+export interface OpcionesEmision {
+  // Por defecto, emitir FALLA si el historial ya tiene un documento del mismo
+  // tipo, receptor, fecha y monto: casi siempre es un reintento de algo que sí
+  // salió. `true` lo permite (dos facturas legítimamente idénticas el mismo día).
+  permitirDuplicado?: boolean;
+}
+
+/**
+ * El envío salió (o pudo salir) y NO se pudo confirmar contra el historial.
+ * El documento puede existir o no. Quien la recibe NO debe reintentar: tiene
+ * que mirar el historial del portal y resolver a mano. Es la única falla de
+ * `emitirDte` que no garantiza "no se emitió nada".
+ */
+export class EmisionIncierta extends Error {
+  constructor(mensaje: string, readonly folioPropuesto: number) {
+    super(mensaje);
+    this.name = 'EmisionIncierta';
+  }
+}
+
+/** Ya existe en el historial un documento igual al que se iba a emitir. */
+export class DteDuplicadoProbable extends Error {
+  constructor(mensaje: string, readonly existente: DteEmitidoMipyme) {
+    super(mensaje);
+    this.name = 'DteDuplicadoProbable';
+  }
+}
+
+const MAX_PAGINAS_VERIFICACION = 5;
+const INTENTOS_VERIFICACION = 4;
+
+function rutNormalizado(rut: string): string {
+  return rut.replace(/[.\s]/g, '').toUpperCase();
 }
 
 export interface BorradorGuardado {
@@ -2663,7 +2712,15 @@ export class MipymeHttpScraper {
   // previsualizó, sin ningún error visible. Por eso tampoco se expone un
   // `firmar(campos)` público: el estado que hace válido a ese `campos` sólo
   // existe adentro de esta sección.
-  async emitirDte(params: EmitirDteParams, confirmar = false): Promise<PrevisualizacionDte | DteEmitido> {
+  // Pausa entre reintentos de la verificación post-envío (el historial puede
+  // tardar unos segundos en mostrar el documento). Mutable para los tests.
+  pausaVerificacionMs = 2500;
+
+  async emitirDte(
+    params: EmitirDteParams,
+    confirmar = false,
+    opciones: OpcionesEmision = {}
+  ): Promise<PrevisualizacionDte | DteEmitido> {
     if (!TIPOS_SOPORTADOS.includes(params.tipoDte as (typeof TIPOS_SOPORTADOS)[number])) {
       throw new Error(
         `El tipo de documento ${params.tipoDte} no está soportado: sólo se relevó el formulario ` +
@@ -2685,7 +2742,7 @@ export class MipymeHttpScraper {
     // firma nada y funciona bien con clave.
     if (confirmar) this.session.assertPuedeFirmar();
 
-    return this.session.conEmpresaExclusiva(() => this.prepararYEmitir(params, confirmar));
+    return this.session.conEmpresaExclusiva(() => this.prepararYEmitir(params, confirmar, opciones));
   }
 
   /**
@@ -2795,7 +2852,8 @@ export class MipymeHttpScraper {
   // siguiente.
   private async prepararYEmitir(
     params: EmitirDteParams,
-    confirmar: boolean
+    confirmar: boolean,
+    opciones: OpcionesEmision = {}
   ): Promise<PrevisualizacionDte | DteEmitido> {
     const { empresaRut, emisor, totales, campos } = await this.prepararCampos(params);
     const previewHtml = await this.http.postForm(PREVIEW_URL, campos, { charset: 'latin1' });
@@ -2805,6 +2863,7 @@ export class MipymeHttpScraper {
     this.assertPrevisualizacionValida(previewHtml);
 
     const camposFirma = parseCamposFormulario(previewHtml, 'PreViewDTE');
+    this.assertDescripcionesConservadas(params, camposFirma);
     const resumen: ResumenDte = {
       tipoDte: params.tipoDte,
       emisorRut: empresaRut,
@@ -2822,16 +2881,87 @@ export class MipymeHttpScraper {
 
     if (!confirmar) return { emitido: false, resumen, campos: camposFirma };
 
+    // Foto del historial ANTES de emitir. Sirve para dos cosas: detectar que
+    // este mismo documento ya existe (un reintento de algo que sí salió), y
+    // reconocer después cuál es la fila NUEVA sin depender del folio propuesto.
+    // Es una lectura: si falla, no se emitió nada.
+    const previos = await this.emitidosDelDia(params.tipoDte, resumen.fechaEmision);
+    const iguales = previos.filter(d => this.esElMismoDocumento(d, resumen));
+    if (iguales.length > 0 && !opciones.permitirDuplicado) {
+      const d = iguales[0];
+      throw new DteDuplicadoProbable(
+        `Ya existe en el historial un documento tipo ${d.tipoDte} para ${d.receptorRut} por ` +
+        `${d.monto} con fecha ${d.fecha} (folio ${d.folio}, codigo ${d.codigo}). NO se emitió nada: ` +
+        'parece un reintento de algo que ya salió. Si de verdad son dos documentos iguales, ' +
+        'emitir con permitirDuplicado.',
+        d
+      );
+    }
+
     // A partir de acá se emite. Tres pasos: el portal arma el XML, el SII lo
     // firma con el certificado centralizado, y el último POST lo envía.
     const firmaHtml = await this.http.postForm(FIRMA_URL, camposFirma, { charset: 'latin1' });
-    const folio = await this.firmarYEnviar(firmaHtml);
-    return { emitido: true, folio, resumen };
+    const emitido = await this.firmarYEnviar(firmaHtml, resumen, new Set(previos.map(d => d.codigo)));
+    return { emitido: true, ...emitido, resumen };
+  }
+
+  // Todos los emitidos de un tipo en la fecha del documento, con la empresa YA
+  // seleccionada (se llama dentro de la sección crítica). No filtra por receptor
+  // en la consulta: el formato que espera RUT_RECP no está relevado y un filtro
+  // mal formado no da error, da cero filas — que acá se leería como "no existe".
+  private async emitidosDelDia(tipoDte: number, fecha: string): Promise<DteEmitidoMipyme[]> {
+    const filtros: FiltrosDteEmitidos = { tipoDte };
+    if (/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+      filtros.fechaDesde = fecha;
+      filtros.fechaHasta = fecha;
+    }
+    const docs: DteEmitidoMipyme[] = [];
+    for (let pagina = 1; pagina <= MAX_PAGINAS_VERIFICACION; pagina++) {
+      const html = await this.http.get(HISTORIAL_URL, this.params(filtros, pagina));
+      this.assertEmpresaSeleccionada(html);
+      this.assertNoPaginaDeErrorDelPortal(html);
+      docs.push(...this.parseHistorial(html));
+      const total = this.parseTotalPaginas(html);
+      if (total === null || pagina >= total) break;
+    }
+    return docs;
+  }
+
+  private esElMismoDocumento(d: DteEmitidoMipyme, resumen: ResumenDte): boolean {
+    return d.tipoDte === resumen.tipoDte
+      && rutNormalizado(d.receptorRut) === rutNormalizado(resumen.receptorRut)
+      && d.monto === resumen.total
+      && (!/^\d{4}-\d{2}-\d{2}$/.test(resumen.fechaEmision) || d.fecha === resumen.fechaEmision);
+  }
+
+  // La descripción extendida es lo único del documento que este scraper manda
+  // sin haberlo relevado en vivo (el checkbox `DESCRIP_nn` lo dibuja un JS
+  // externo). La previsualización devuelve el documento normalizado por el SII,
+  // así que se puede comprobar SIN emitir: si el portal no la conservó, se
+  // falla acá en vez de firmar una factura sin glosa.
+  private assertDescripcionesConservadas(params: EmitirDteParams, camposFirma: Record<string, string>): void {
+    const limpio = (t: string) => t.replace(/\s+/g, ' ').trim();
+    params.lineas.forEach((linea, i) => {
+      if (!linea.descripcion) return;
+      const n = String(i + 1).padStart(2, '0');
+      const devuelta = camposFirma[`EFXP_DSC_ITEM_${n}`] ?? '';
+      if (limpio(devuelta) !== limpio(linea.descripcion)) {
+        throw new Error(
+          `El portal no conservó la descripción extendida del ítem ${i + 1} en la previsualización ` +
+          `(devolvió "${devuelta.slice(0, 60)}"). NO se emitió nada. Hay que relevar cómo el ` +
+          'formulario envía DESCRIP/EFXP_DSC_ITEM antes de emitir con descripción.'
+        );
+      }
+    });
   }
 
   // Los tres pasos finales, los que efectivamente emiten. Se hace en un método
   // aparte para que el camino sin `confirmar` no pueda entrar acá por descuido.
-  private async firmarYEnviar(firmaHtml: string): Promise<number> {
+  private async firmarYEnviar(
+    firmaHtml: string,
+    resumen: ResumenDte,
+    codigosPrevios: Set<string>
+  ): Promise<{ folio: number; codigo: string; folioPropuesto: number }> {
     const { campos, firmado, folio } = await this.firmar(firmaHtml);
     if (!firmado.ok) {
       throw new Error(
@@ -2840,20 +2970,54 @@ export class MipymeHttpScraper {
       );
     }
 
-    const envio = await this.http.postForm(
-      SEND_XML_URL,
-      { ...campos, txtSignText: firmado.xml },
-      { charset: 'latin1' }
-    );
+    // DESDE ACÁ nada puede prometer "no se emitió": el POST que emite ya salió.
+    // Un corte de red en este punto deja el documento en estado desconocido.
+    let envio: string;
+    try {
+      envio = await this.http.postForm(
+        SEND_XML_URL,
+        { ...campos, txtSignText: firmado.xml },
+        { charset: 'latin1' }
+      );
+    } catch (e) {
+      throw new EmisionIncierta(
+        `El envío al SII falló a mitad de camino (${e instanceof Error ? e.message : String(e)}). ` +
+        `El documento PUDO haberse emitido (folio propuesto ${folio}). NO reintentar: revisar el ` +
+        'historial de emitidos del portal.',
+        folio
+      );
+    }
 
+    // Rechazos que el portal declara: acá sí se sabe que no salió.
     this.assertEnvioAceptado(envio);
-    // Se devuelve el folio PROPUESTO (el de la página de firma), no el asignado:
-    // la respuesta de mipeSendXML.cgi no está relevada, así que no se puede leer
-    // el folio real de ahí. La tool marca esta salvedad y manda a verificar
-    // contra el historial. No afirmar el folio con certeza evita repetir el
-    // falso positivo del "folio 21". Cuando se releve el envío, leer el folio de
-    // `envio` en vez de reusar el propuesto.
-    return folio;
+
+    // La respuesta de mipeSendXML.cgi no está relevada, así que no se lee nada
+    // de ella. La prueba de que el documento existe es el historial: la fila
+    // nueva (que no estaba en la foto previa) con el mismo receptor y monto.
+    // De ahí salen el folio REAL y el `codigo` para el PDF.
+    let ultimoError = '';
+    for (let intento = 1; intento <= INTENTOS_VERIFICACION; intento++) {
+      try {
+        const ahora = await this.emitidosDelDia(resumen.tipoDte, resumen.fechaEmision);
+        const nuevos = ahora.filter(d => !codigosPrevios.has(d.codigo) && this.esElMismoDocumento(d, resumen));
+        if (nuevos.length > 0) {
+          const doc = nuevos.find(d => d.folio === folio) ?? nuevos[0];
+          return { folio: doc.folio, codigo: doc.codigo, folioPropuesto: folio };
+        }
+        ultimoError = 'el historial todavía no muestra el documento';
+      } catch (e) {
+        ultimoError = e instanceof Error ? e.message : String(e);
+      }
+      if (intento < INTENTOS_VERIFICACION && this.pausaVerificacionMs > 0) {
+        await esperar(this.pausaVerificacionMs);
+      }
+    }
+    throw new EmisionIncierta(
+      `El portal aceptó el envío pero el documento no aparece en el historial tras ` +
+      `${INTENTOS_VERIFICACION} consultas (${ultimoError}). Folio propuesto ${folio}. ` +
+      'NO reintentar: revisar el historial de emitidos del portal.',
+      folio
+    );
   }
 
   // Todo el camino hasta la firma, sin enviar. Lo comparten la emisión y
@@ -3040,6 +3204,9 @@ export class MipymeHttpScraper {
       if (linea.nombre && linea.nombre.length > 25) {
         faltan.push(`El nombre del ítem ${i + 1} supera los 25 caracteres que acepta el portal`);
       }
+      if (linea.descripcion && linea.descripcion.length > MAX_DESCRIPCION_ITEM) {
+        faltan.push(`La descripción del ítem ${i + 1} supera los ${MAX_DESCRIPCION_ITEM} caracteres`);
+      }
       if (!(linea.cantidad >= 1)) faltan.push(`Cantidad del ítem ${i + 1} debe ser mayor a 0`);
       if (!(linea.precioUnitario >= 0)) faltan.push(`Precio del ítem ${i + 1} debe ser mayor o igual a 0`);
     });
@@ -3145,6 +3312,14 @@ export class MipymeHttpScraper {
       campos[`EFXP_PRC_${n}`] = String(linea.precioUnitario);
       campos[`EFXP_PCTD_${n}`] = '';
       campos[`EFXP_SUBT_${n}`] = String(totales.subtotales[i]);
+      // Descripción extendida. El checkbox viaja sólo si se usa, como todo
+      // checkbox del formulario (su valor es "SiChecked" en todos los del
+      // portal). Que el SII la tomó se comprueba en la previsualización
+      // (`assertDescripcionesConservadas`), antes de firmar.
+      if (linea.descripcion) {
+        campos[`DESCRIP_${n}`] = 'SiChecked';
+        campos[`EFXP_DSC_ITEM_${n}`] = linea.descripcion;
+      }
     });
 
     // El bloque de referencias sólo viaja si hay referencias, y entonces con su

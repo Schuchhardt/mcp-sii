@@ -187,3 +187,32 @@ firmar, y decodificar sus entidades rompería la firma.
    sin relevar. La tool los rechaza explícito.
 4. El detalle de líneas de un documento emitido, que sigue sin estar en
    `mipeGesDocEmi.cgi`.
+
+
+## Actualización 2026-11-11: verificación contra el historial, anti-duplicado y lote
+
+Nada de esto ejercita la emisión (el punto 1 de arriba sigue abierto); la deja lista
+para ejercitarla sin depender de la respuesta que falta relevar.
+
+- **El éxito ya no se infiere de `mipeSendXML.cgi`.** Antes de firmar se toma una foto
+  del historial del día (`mipeAdminDocsEmi.cgi`, filtrado por tipo y fecha). Después de
+  enviar se busca la fila NUEVA —que no estaba en la foto— con el mismo receptor y
+  monto. De esa fila salen el folio real y el `codigo` (el que pide el PDF). Si no
+  aparece tras 4 consultas, o si el POST de envío se corta, se lanza `EmisionIncierta`:
+  es la única falla que no garantiza "no se emitió".
+- **Anti-duplicado.** Si la foto previa ya trae un documento igual (tipo, receptor,
+  fecha, monto) se lanza `DteDuplicadoProbable` antes de pedir la firma.
+  `permitirDuplicado` lo desactiva.
+- **El filtro `RUT_RECP` no se usa en esa consulta**: su formato no está relevado y un
+  filtro mal formado da cero filas, que acá se leería como "no existe". Se filtra por
+  tipo y fecha y se compara el receptor en código.
+- **Descripción extendida del ítem** (`DESCRIP_nn=SiChecked` + `EFXP_DSC_ITEM_nn`).
+  El checkbox lo dibuja un JS externo y **no está relevado**; el valor sigue la
+  convención de todos los checkbox del formulario. La previsualización devuelve
+  `EFXP_DSC_ITEM_nn` en sus hidden, así que se verifica ahí que el SII la conservó
+  y se falla antes de firmar si no.
+- **Lote y registro local**: `src/emision/` y `npm run facturar` (ver el README).
+
+Pendiente al ejercitar la primera emisión: guardar la respuesta real de
+`mipeSendXML.cgi` como fixture anonimizada y confirmar que el historial muestra el
+documento dentro de la ventana de reintentos (4 consultas, 2,5 s entre cada una).

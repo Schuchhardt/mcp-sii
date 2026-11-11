@@ -7,6 +7,8 @@ import {
   calcularTotales,
   decodificarEntidades,
   EmitirDteParams,
+  EmisionIncierta,
+  DteDuplicadoProbable,
 } from '../../src/scrapers/mipymeHttp';
 import { SiiHttpClient } from '../../src/http';
 import { SessionManager } from '../../src/session';
@@ -28,6 +30,25 @@ const SEL_EMPRESA = fs.readFileSync(
   'utf-8'
 );
 const PAGINA_FIRMA = fixture('mipyme-pagina-firma.html');
+const HISTORIAL = fixture('mipyme-historial-emitidos.html');
+
+// El historial del portal con filas agregadas. La fila por defecto es la que
+// corresponde al documento de `params()` tal como lo normaliza PREVIEW_33:
+// receptor 11111111-1, total 4, fecha 2026-08-11.
+function filaHistorial(f: { codigo?: string; folio?: number; rut?: string; monto?: number; fecha?: string } = {}): string {
+  return `<tr>
+    <td><a href="/cgi-bin/Portal001/mipeGesDocEmi.cgi?ALL_PAGE_ANT=1&CODIGO=${f.codigo ?? '555001'}"><img src="/Portal001/button_edit.gif" border="0"></a></td>
+    <td>${f.rut ?? '11111111-1'}<td>RECEPTORA FICTICIA S.A.</td>
+    <td>Factura Electronica</td>
+    <td>${f.folio ?? 22}</td>
+    <td>${f.fecha ?? '2026-08-11'}</td>
+    <td>${f.monto ?? 4}</td>
+    <td>Documento Emitido</td>
+  </tr>`;
+}
+function historialCon(...filas: string[]): string {
+  return HISTORIAL.replace('</table>', `${filas.join('\n')}</table>`);
+}
 
 // El receptor de las pruebas: RUT ficticio con DV que sí cuadra por módulo 11,
 // porque la validación lo exige.
@@ -419,27 +440,183 @@ describe('MipymeHttpScraper.emitirDte: firma y envío', () => {
   function armarConFirma(overrides: {
     certs?: string;
     firmado?: string;
-    envio?: string;
+    envio?: string | Error;
+    preview?: string;
+    // El historial ANTES de enviar y DESPUÉS de enviar. Por defecto: antes no
+    // está el documento, después aparece con el folio propuesto (22).
+    historialPrevio?: string;
+    historialPosterior?: string;
   } = {}) {
     const ctx = armar();
+    ctx.scraper.pausaVerificacionMs = 0;
     (ctx.session.identidad as jest.Mock) = jest.fn(() => ({ rut: '11111111', dv: '1' }));
     (ctx.session.claveCertificadoSii as jest.Mock) = jest.fn(() => 'clave-del-certificado');
 
+    let enviado = false;
     (ctx.http.get as jest.Mock).mockImplementation(async (url: string) => {
       if (url.includes('getCertDigital')) {
         return overrides.certs ?? '[{"nombre":"1","rut":11111111,"dv":"1"}]';
+      }
+      if (url.includes('mipeAdminDocsEmi')) {
+        return enviado
+          ? (overrides.historialPosterior ?? historialCon(filaHistorial()))
+          : (overrides.historialPrevio ?? HISTORIAL);
       }
       return url.includes('mipeGenFacEx') ? FORM_33 : SEL_EMPRESA;
     });
     (ctx.http.postForm as jest.Mock).mockImplementation(async (url: string) => {
       if (url.includes('mipeSelEmpresa')) return '<html>ok</html>';
-      if (url.includes('mipeDisplayPreView')) return PREVIEW_33;
+      if (url.includes('mipeDisplayPreView')) return overrides.preview ?? PREVIEW_33;
       if (url.includes('mipeGenXMLFirma')) return PAGINA_FIRMA;
       if (url.includes('postFirmaDigital')) return overrides.firmado ?? XML_FIRMADO;
+      enviado = true;
+      if (overrides.envio instanceof Error) throw overrides.envio;
       return overrides.envio ?? '<html><body>Documento enviado</body></html>';
     });
     return ctx;
   }
+
+  // ---- Verificación post-envío: el historial es la prueba de que existe ----
+
+  it('devuelve el folio REAL y el codigo de la fila nueva del historial', async () => {
+    const { scraper } = armarConFirma({
+      historialPosterior: historialCon(filaHistorial({ codigo: '555777', folio: 22 })),
+    });
+
+    const r = await scraper.emitirDte(params(), true);
+
+    expect(r).toMatchObject({ emitido: true, folio: 22, codigo: '555777', folioPropuesto: 22 });
+  });
+
+  it('si el SII asignó otro folio que el propuesto, gana el del historial', async () => {
+    // El folio propuesto no queda tomado hasta firmar y enviar: otro documento
+    // pudo llevárselo. El real es el de la fila.
+    const { scraper } = armarConFirma({
+      historialPosterior: historialCon(filaHistorial({ codigo: '555778', folio: 23 })),
+    });
+
+    const r = await scraper.emitirDte(params(), true);
+
+    expect(r).toMatchObject({ folio: 23, codigo: '555778', folioPropuesto: 22 });
+  });
+
+  it('si el documento no aparece en el historial, la emisión queda INCIERTA y no "emitida"', async () => {
+    // El portal no rechazó el envío, pero tampoco hay fila nueva: no se puede
+    // afirmar ni que salió ni que no. Es el caso que no se puede reintentar.
+    const { scraper } = armarConFirma({ historialPosterior: HISTORIAL });
+
+    const error = await scraper.emitirDte(params(), true).catch(e => e);
+
+    expect(error).toBeInstanceOf(EmisionIncierta);
+    expect(error.folioPropuesto).toBe(22);
+    expect(error.message).toMatch(/NO reintentar/);
+  });
+
+  it('una fila que ya estaba antes de enviar no cuenta como la emitida', async () => {
+    // Con permitirDuplicado, el documento igual que ya existía NO puede servir
+    // de prueba de la emisión nueva: la prueba es una fila que no estaba.
+    const previo = historialCon(filaHistorial({ codigo: '555001', folio: 21 }));
+    const { scraper } = armarConFirma({ historialPrevio: previo, historialPosterior: previo });
+
+    await expect(scraper.emitirDte(params(), true, { permitirDuplicado: true }))
+      .rejects.toBeInstanceOf(EmisionIncierta);
+  });
+
+  it('un corte de red en el POST que emite es INCIERTO, no "no se emitió"', async () => {
+    const { scraper } = armarConFirma({ envio: new Error('socket hang up') });
+
+    const error = await scraper.emitirDte(params(), true).catch(e => e);
+
+    expect(error).toBeInstanceOf(EmisionIncierta);
+    expect(error.message).toMatch(/PUDO haberse emitido/);
+  });
+
+  // ---- Anti-duplicado contra el historial ----
+
+  it('no emite si el historial ya tiene el mismo documento (reintento de algo que salió)', async () => {
+    const { scraper, http } = armarConFirma({
+      historialPrevio: historialCon(filaHistorial({ codigo: '555001', folio: 21 })),
+    });
+
+    const error = await scraper.emitirDte(params(), true).catch(e => e);
+
+    expect(error).toBeInstanceOf(DteDuplicadoProbable);
+    expect(error.existente).toMatchObject({ folio: 21, codigo: '555001' });
+    // Falla ANTES de pedir la firma: no salió nada hacia el SII.
+    expect(urlsPosteadas(http).some(u => u.includes('mipeGenXMLFirma'))).toBe(false);
+    expect(urlsPosteadas(http).some(u => u.includes('mipeSendXML'))).toBe(false);
+  });
+
+  it('otro monto u otro receptor el mismo día no es un duplicado', async () => {
+    const { scraper } = armarConFirma({
+      historialPrevio: historialCon(
+        filaHistorial({ codigo: '555001', folio: 20, monto: 5 }),
+        filaHistorial({ codigo: '555002', folio: 21, rut: '33333333-3' })
+      ),
+      historialPosterior: historialCon(
+        filaHistorial({ codigo: '555001', folio: 20, monto: 5 }),
+        filaHistorial({ codigo: '555002', folio: 21, rut: '33333333-3' }),
+        filaHistorial({ codigo: '555003', folio: 22 })
+      ),
+    });
+
+    await expect(scraper.emitirDte(params(), true)).resolves.toMatchObject({ folio: 22, codigo: '555003' });
+  });
+
+  it('con permitirDuplicado emite aunque exista uno igual, y devuelve la fila NUEVA', async () => {
+    const previo = filaHistorial({ codigo: '555001', folio: 21 });
+    const { scraper } = armarConFirma({
+      historialPrevio: historialCon(previo),
+      historialPosterior: historialCon(previo, filaHistorial({ codigo: '555009', folio: 22 })),
+    });
+
+    await expect(scraper.emitirDte(params(), true, { permitirDuplicado: true }))
+      .resolves.toMatchObject({ folio: 22, codigo: '555009' });
+  });
+
+  // ---- Descripción extendida ----
+
+  const GLOSA = 'Comisión por administración de arriendo temporal – Octubre 2026';
+  const conGlosa = () => params({ lineas: [{ nombre: 'COMISION', cantidad: 1, precioUnitario: 3, descripcion: GLOSA }] });
+
+  it('manda la descripción extendida con su checkbox', async () => {
+    const preview = PREVIEW_33.replace(
+      'name="EFXP_DSC_ITEM_01" value=""', `name="EFXP_DSC_ITEM_01" value="${GLOSA}"`);
+    expect(preview).not.toBe(PREVIEW_33);
+    const { scraper, http } = armarConFirma({ preview });
+
+    await scraper.emitirDte(conGlosa(), false);
+
+    const post = (http.postForm as jest.Mock).mock.calls.find(c => (c[0] as string).includes('mipeDisplayPreView'));
+    expect(post![1].EFXP_DSC_ITEM_01).toBe(GLOSA);
+    expect(post![1].DESCRIP_01).toBe('SiChecked');
+  });
+
+  it('sin descripción no manda el checkbox (un checkbox sin marcar no viaja)', async () => {
+    const { scraper, http } = armarConFirma();
+
+    await scraper.emitirDte(params(), false);
+
+    const post = (http.postForm as jest.Mock).mock.calls.find(c => (c[0] as string).includes('mipeDisplayPreView'));
+    expect(post![1]).not.toHaveProperty('DESCRIP_01');
+    expect(post![1]).not.toHaveProperty('EFXP_DSC_ITEM_01');
+  });
+
+  it('falla en la PREVISUALIZACIÓN si el portal no conservó la descripción', async () => {
+    // PREVIEW_33 devuelve EFXP_DSC_ITEM_01 vacío: el SII ignoró la glosa.
+    // Firmar igual emitiría una factura sin la glosa que se pidió.
+    const { scraper, http } = armarConFirma();
+
+    await expect(scraper.emitirDte(conGlosa(), true)).rejects.toThrow(/no conservó la descripción[\s\S]*NO se emitió nada/);
+    expect(urlsPosteadas(http).some(u => u.includes('mipeGenXMLFirma'))).toBe(false);
+  });
+
+  it('rechaza una descripción de más de 1000 caracteres antes de tocar el portal', async () => {
+    const { scraper } = armarConFirma();
+    const larga = params({ lineas: [{ nombre: 'X', cantidad: 1, precioUnitario: 3, descripcion: 'a'.repeat(1001) }] });
+
+    await expect(scraper.emitirDte(larga, false)).rejects.toThrow(/supera los 1000 caracteres/);
+  });
 
   it('firma el XML con el certificado del SII y lo envía, devolviendo el folio', async () => {
     const { scraper, http } = armarConFirma();

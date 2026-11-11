@@ -135,7 +135,7 @@ describe('registerMipymeTools', () => {
     const result = await tools['sii_mipyme_emitir_dte'].handler(emisionMinima);
 
     // El segundo argumento es el que firma: tiene que llegar en false.
-    expect(MockHttp.prototype.emitirDte).toHaveBeenCalledWith(expect.anything(), false);
+    expect(MockHttp.prototype.emitirDte).toHaveBeenCalledWith(expect.anything(), false, expect.anything());
     // Y la respuesta tiene que decir que NO se emitió: un resumen con montos,
     // sin aviso, se lee como un documento ya emitido.
     expect(result.content[0].text).toMatch(/NO emitido/i);
@@ -154,7 +154,7 @@ describe('registerMipymeTools', () => {
       confirmar: true,
     });
 
-    expect(MockHttp.prototype.emitirDte).toHaveBeenCalledWith(expect.anything(), true);
+    expect(MockHttp.prototype.emitirDte).toHaveBeenCalledWith(expect.anything(), true, { permitirDuplicado: false });
     expect(result.content[0].text).toContain('1234');
   });
 
@@ -184,14 +184,14 @@ describe('registerMipymeTools', () => {
     expect(MockHttp.prototype.guardarBorrador).toHaveBeenCalledWith(expect.anything(), true, '77');
   });
 
-  it('sii_mipyme_emitir_dte avisa que el folio emitido está pendiente de verificación', async () => {
-    // El folio sale de la página de firma (el propuesto): la respuesta de
-    // mipeSendXML no está relevada, así que no se puede afirmar que ese sea el
-    // folio asignado. Reportarlo sin salvedad es el falso positivo del "folio
-    // 21". La tool tiene que decir que hay que confirmarlo contra el historial.
+  it('sii_mipyme_emitir_dte devuelve el folio verificado y el codigo del PDF', async () => {
+    // El scraper ya verificó la emisión contra el historial: la tool entrega el
+    // folio real y el `codigo`, que es lo que pide el PDF.
     (MockHttp.prototype.emitirDte as jest.Mock).mockResolvedValue({
       emitido: true,
       folio: 1234,
+      codigo: '987700',
+      folioPropuesto: 1234,
       resumen: { neto: 100000, iva: 19000, total: 119000 },
     });
     const { tools } = armar();
@@ -201,8 +201,8 @@ describe('registerMipymeTools', () => {
       confirmar: true,
     });
 
-    expect(result.content[0].text).toMatch(/verificar|pendiente|confirmar/i);
-    expect(result.content[0].text).toContain('sii_mipyme_list_dte_emitidos');
+    expect(result.content[0].text).toMatch(/verificado contra el historial/i);
+    expect(result.content[0].text).toContain('987700');
   });
 
   it('sii_mipyme_emitir_dte traduce los nombres de los campos al contrato del scraper', async () => {
@@ -223,7 +223,8 @@ describe('registerMipymeTools', () => {
         lineas: [{ nombre: 'Servicio', cantidad: 1, precioUnitario: 100000, unidad: undefined }],
         referencias: [{ tipoDoc: 33, folio: 244, fecha: '2026-08-01', razon: undefined, codigo: 1 }],
       }),
-      false
+      false,
+      { permitirDuplicado: false }
     );
   });
 
