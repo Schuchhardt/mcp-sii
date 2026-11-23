@@ -11,3 +11,8 @@ dist/
 
 # Scripts de verificación en vivo con RUTs reales (no versionar)
 verificar-*.ts
+
+# Registro local de emisiones y PDF bajados por `npm run facturar`: datos
+# tributarios reales.
+emisiones/
+*.lote.csv

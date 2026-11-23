@@ -84,7 +84,8 @@ export function registerMipymeTools(server: McpServer, registro: RegistroSesione
     'IRREVERSIBLE que notifica al receptor y sólo se deshace con una nota de crédito: pedí ' +
     'autorización explícita del usuario antes de mandar confirmar=true, nunca lo uses para ' +
     'probar. Firmar requiere que el contribuyente tenga su certificado digital cargado en el ' +
-    'SII y la clave en SII_CERT_CLAVE_SII (o SII_CERT_PASSWORD). En una factura afecta el IVA ' +
+    'SII y la clave de ese certificado en SII_CERT_CLAVE_SII; el archivo del certificado en ' +
+    'esta máquina no hace falta. En una factura afecta el IVA ' +
     'se redondea, así que el neto mínimo emisible es 3: con 1 ó 2 el IVA da 0 y el portal la ' +
     'rechaza.',
     schemaEmitirDte,
@@ -99,6 +100,7 @@ export function registerMipymeTools(server: McpServer, registro: RegistroSesione
         },
         lineas: args.lineas.map(l => ({
           nombre: l.descripcion, cantidad: l.cantidad, precioUnitario: l.precio_unitario, unidad: l.unidad,
+          descripcion: l.descripcion_detalle,
         })),
         formaPago: args.forma_pago,
         ciudadEmisor: args.ciudad_emisor,
@@ -106,14 +108,14 @@ export function registerMipymeTools(server: McpServer, registro: RegistroSesione
         referencias: args.referencias?.map(r => ({
           tipoDoc: r.tipo_doc, folio: r.folio, fecha: r.fecha, razon: r.razon, codigo: r.codigo,
         })),
-      }, args.confirmar);
+      }, args.confirmar, { permitirDuplicado: args.permitir_duplicado === true });
 
       return resultado.emitido
         ? {
-            emitido: true, folio: resultado.folio, resumen: resultado.resumen,
-            aviso: `Documento emitido. El folio ${resultado.folio} es el que propuso el ` +
-              'portal; hay que verificar que quedó asignado consultando ' +
-              'sii_mipyme_list_dte_emitidos (la respuesta del envío aún no está relevada).',
+            emitido: true, folio: resultado.folio, codigo: resultado.codigo,
+            folio_propuesto: resultado.folioPropuesto, resumen: resultado.resumen,
+            aviso: `Documento emitido y verificado contra el historial del portal: folio ` +
+              `${resultado.folio}, codigo ${resultado.codigo} (el codigo es el que pide el PDF).`,
           }
         : {
             emitido: false, resumen: resultado.resumen,

@@ -2,8 +2,9 @@ import { Pool } from 'pg';
 import { aplicarMigraciones } from '../../src/scripts/migrar';
 import { crearTenant } from '../../src/scripts/crearTenant';
 import { chequearRateLimitTenant, contadorFallosIp, registrarFalloIp } from '../../src/rest/rateLimit';
+import { describeConBase } from '../setup/conBaseDeTest';
 
-describe('rate limit', () => {
+describeConBase('rate limit', () => {
   const pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
 
   beforeAll(async () => { await aplicarMigraciones(pool); });

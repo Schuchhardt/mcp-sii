@@ -5,6 +5,7 @@ import { crearTenant } from '../src/scripts/crearTenant';
 import { crearRestServer } from '../src/restServer';
 import { RegistroSesiones } from '../src/registroSesiones';
 import { ProveedorCredencialesRuntime } from '../src/credencialesRuntime';
+import { describeConBase } from './setup/conBaseDeTest';
 
 function request(port: number, opts: { path: string; headers?: Record<string, string>; body?: string }) {
   return new Promise<{ status: number; body: string }>((resolve, reject) => {
@@ -31,7 +32,7 @@ function proximaIpDeTest(): string {
   return `10.99.0.${contadorIpDeTest}`;
 }
 
-describe('restServer', () => {
+describeConBase('restServer', () => {
   const pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
   let server: http.Server;
   let port: number;

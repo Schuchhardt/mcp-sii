@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { EmitirDteParams, MAX_TRAMOS_ABSOLUTO, MAX_TRAMOS_POR_DEFECTO } from '../../scrapers/mipymeHttp';
+import { EmitirDteParams, MAX_DESCRIPCION_ITEM, MAX_TRAMOS_ABSOLUTO, MAX_TRAMOS_POR_DEFECTO } from '../../scrapers/mipymeHttp';
 import { rutEsValido } from '../../rut';
 
 export const RUT_DESC = 'RUT de la persona con sesión iniciada vía sii_iniciar_sesion';
@@ -172,6 +172,8 @@ export const camposDocumento = {
     cantidad: z.number().describe('Cantidad'),
     precio_unitario: z.number().int().describe('Precio unitario sin IVA'),
     unidad: z.string().optional().describe('Unidad de medida (máximo 4 caracteres)'),
+    descripcion_detalle: z.string().max(MAX_DESCRIPCION_ITEM).optional()
+      .describe('Descripción extendida del ítem (la columna "Descrip." del portal). Para glosas que no caben en los 25 caracteres del nombre.'),
   })).min(1).describe('Líneas de detalle del documento'),
   forma_pago: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional().describe('1=contado, 2=crédito (default), 3=sin costo'),
   ciudad_emisor: z.string().optional().describe('Ciudad del emisor. El portal la exige y no la trae cargada; si se omite se usa su comuna.'),
@@ -189,6 +191,7 @@ export const camposDocumento = {
 export const schemaEmitirDte = {
   ...camposDocumento,
   confirmar: z.boolean().default(false).describe('false (default) = sólo previsualiza. true = FIRMA Y EMITE el documento, acto real e irreversible.'),
+  permitir_duplicado: z.boolean().default(false).describe('Por defecto, emitir falla si el historial ya tiene un documento del mismo tipo, receptor, fecha y monto (casi siempre un reintento). true lo permite.'),
 };
 
 // Guardar borrador = los mismos campos del documento + borrador_id + su propio
@@ -208,7 +211,7 @@ export interface CamposDocumentoBody {
   empresa_rut?: string; tipo_dte: number;
   receptor_rut: string; receptor_dv: string; receptor_razon_social: string; receptor_giro: string;
   receptor_direccion: string; receptor_comuna: string; receptor_ciudad: string;
-  lineas: { descripcion: string; cantidad: number; precio_unitario: number; unidad?: string }[];
+  lineas: { descripcion: string; cantidad: number; precio_unitario: number; unidad?: string; descripcion_detalle?: string }[];
   forma_pago?: 1 | 2 | 3; ciudad_emisor?: string; fecha_emision?: string;
   referencias?: { tipo_doc: number; folio: number; fecha: string; razon?: string; codigo?: 1 | 2 | 3 }[];
 }
@@ -222,7 +225,7 @@ export function paramsDocumento(datos: CamposDocumentoBody): EmitirDteParams {
       giro: datos.receptor_giro, direccion: datos.receptor_direccion, comuna: datos.receptor_comuna,
       ciudad: datos.receptor_ciudad,
     },
-    lineas: datos.lineas.map(l => ({ nombre: l.descripcion, cantidad: l.cantidad, precioUnitario: l.precio_unitario, unidad: l.unidad })),
+    lineas: datos.lineas.map(l => ({ nombre: l.descripcion, cantidad: l.cantidad, precioUnitario: l.precio_unitario, unidad: l.unidad, descripcion: l.descripcion_detalle })),
     formaPago: datos.forma_pago, ciudadEmisor: datos.ciudad_emisor, fechaEmision: datos.fecha_emision,
     referencias: datos.referencias?.map(r => ({ tipoDoc: r.tipo_doc, folio: r.folio, fecha: r.fecha, razon: r.razon, codigo: r.codigo })),
   };
