@@ -9,6 +9,7 @@ import {
   EmitirDteParams,
   EmisionIncierta,
   DteDuplicadoProbable,
+  conComentarioFirma,
 } from '../../src/scrapers/mipymeHttp';
 import { SiiHttpClient } from '../../src/http';
 import { SessionManager } from '../../src/session';
@@ -440,6 +441,7 @@ describe('MipymeHttpScraper.emitirDte: firma y envío', () => {
   function armarConFirma(overrides: {
     certs?: string;
     firmado?: string;
+    paginaFirma?: string;
     envio?: string | Error;
     preview?: string;
     // El historial ANTES de enviar y DESPUÉS de enviar. Por defecto: antes no
@@ -467,7 +469,7 @@ describe('MipymeHttpScraper.emitirDte: firma y envío', () => {
     (ctx.http.postForm as jest.Mock).mockImplementation(async (url: string) => {
       if (url.includes('mipeSelEmpresa')) return '<html>ok</html>';
       if (url.includes('mipeDisplayPreView')) return overrides.preview ?? PREVIEW_33;
-      if (url.includes('mipeGenXMLFirma')) return PAGINA_FIRMA;
+      if (url.includes('mipeGenXMLFirma')) return overrides.paginaFirma ?? PAGINA_FIRMA;
       if (url.includes('postFirmaDigital')) return overrides.firmado ?? XML_FIRMADO;
       enviado = true;
       if (overrides.envio instanceof Error) throw overrides.envio;
@@ -664,6 +666,60 @@ describe('MipymeHttpScraper.emitirDte: firma y envío', () => {
     expect(urlsPosteadas(http).some(u => u.includes('mipeSendXML'))).toBe(false);
   });
 
+  it('el envío lleva los campos de la firma centralizada, como el formulario del portal', async () => {
+    // pluginsii-1.2.js los inserta como <input hidden> dentro de frmSign: sin
+    // ellos mipeSendXML responde «Firma no reconocida!».
+    const { scraper, http } = armarConFirma();
+
+    await scraper.emitirDte(params(), true);
+
+    const envio = (http.postForm as jest.Mock).mock.calls.find(c =>
+      (c[0] as string).includes('mipeSendXML')
+    );
+    expect(envio![1]).toMatchObject({
+      nombre: '1', clave: 'clave-del-certificado',
+      nodo: 'dte:DTE', nodoId: 'dte:Documento', nameSpace: 'http://www.sii.cl/SiiDte',
+    });
+  });
+
+  it('firma el XML con el comentario de firma centralizada delante de <Documento>', () => {
+    const xml = '<?xml version="1.0"?>\n<DTE>\n<Documento ID="X"><A/></Documento></DTE>';
+    const conComentario = conComentarioFirma(xml);
+    expect(conComentario).toContain('<!-- O MacIntel Chrome 158 central VERSION: v20190409 -->\n<Documento ID="X">');
+    // Sólo una vez, como el portal.
+    expect(conComentarioFirma(conComentario)).toBe(conComentario);
+  });
+
+  it('manda el XML a firmar en UTF-8, como el JS del portal', async () => {
+    const { scraper, http } = armarConFirma();
+
+    await scraper.emitirDte(params(), true);
+
+    const firma = (http.postForm as jest.Mock).mock.calls.find(c =>
+      (c[0] as string).includes('postFirmaDigital')
+    );
+    expect(firma![2]).toEqual({ charset: 'utf-8' });
+  });
+
+  it('no envía nada si el SII firmó un texto con las tildes perdidas', async () => {
+    // Relevado: con el POST en latin1 el SII devolvía "OPERACI?N" firmado y
+    // mipeSendXML lo rechazaba con «Firma no reconocida!».
+    const conTilde = PAGINA_FIRMA.replace('<TipoDTE>33</TipoDTE>', '<TipoDTE>33</TipoDTE><GiroEmis>OPERACIÓN</GiroEmis>');
+    const firmadoSinTilde = XML_FIRMADO.replace('<Documento/>', '<Documento><GiroEmis>OPERACI?N</GiroEmis></Documento>');
+    const { scraper, http } = armarConFirma({ paginaFirma: conTilde, firmado: firmadoSinTilde });
+
+    await expect(scraper.emitirDte(params(), true)).rejects.toThrow(/texto distinto[\s\S]*NO se emitió nada/);
+    expect(urlsPosteadas(http).some(u => u.includes('mipeSendXML'))).toBe(false);
+  });
+
+  it('con las tildes conservadas en la firma, envía', async () => {
+    const conTilde = PAGINA_FIRMA.replace('<TipoDTE>33</TipoDTE>', '<TipoDTE>33</TipoDTE><GiroEmis>OPERACIÓN</GiroEmis>');
+    const firmadoConTilde = XML_FIRMADO.replace('<Documento/>', '<Documento><GiroEmis>OPERACIÓN</GiroEmis></Documento>');
+    const { scraper } = armarConFirma({ paginaFirma: conTilde, firmado: firmadoConTilde });
+
+    await expect(scraper.emitirDte(params(), true)).resolves.toMatchObject({ emitido: true });
+  });
+
   it('explica el caso sin certificado centralizado en vez de fallar en el paso siguiente', async () => {
     // Sin certificado cargado en el SII, la única modalidad que queda es el
     // plug-in del navegador, que no se puede replicar por HTTP.
@@ -681,6 +737,33 @@ describe('MipymeHttpScraper.emitirDte: firma y envío', () => {
     });
 
     await expect(scraper.emitirDte(params(), true)).rejects.toThrow(/rechazó el envío.*Error al enviar/);
+  });
+
+  it('«Firma no reconocida!» es un rechazo', async () => {
+    const { scraper } = armarConFirma({
+      envio: `<html><script>alert('Firma no reconocida!');</script></html>`,
+    });
+
+    await expect(scraper.emitirDte(params(), true)).rejects.toThrow(/rechazó el envío.*Firma no reconocida/);
+  });
+
+  it('la página de éxito con su alert de plantilla NO es un rechazo: el historial confirma el folio', async () => {
+    // Relevado con el folio 42: el envío exitoso responde con
+    // alert('pagina sendXML_PLantilla.html') y se reportó como rechazo.
+    const { scraper } = armarConFirma({
+      envio: `<html><script>alert('pagina sendXML_PLantilla.html');</script></html>`,
+    });
+
+    await expect(scraper.emitirDte(params(), true)).resolves.toMatchObject({ emitido: true, folio: 22 });
+  });
+
+  it('un alert desconocido sin el documento en el historial queda incierto, no "no emitido"', async () => {
+    const { scraper } = armarConFirma({
+      envio: `<html><script>alert('algo nuevo');</script></html>`,
+      historialPosterior: HISTORIAL,
+    });
+
+    await expect(scraper.emitirDte(params(), true)).rejects.toBeInstanceOf(EmisionIncierta);
   });
 
   it('no da por emitido cuando el portal vuelve a pedir la firma', async () => {

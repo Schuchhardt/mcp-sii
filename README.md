@@ -581,15 +581,25 @@ empresa en el portal.
 
 ### Advertencias
 
-- **La emisión de `sii_mipyme_emitir_dte` todavía no se ejercitó contra el SII real.**
-  El camino completo está implementado por HTTP (seis pasos, ver
-  [el contrato](docs/superpowers/specs/2026-08-11-mipyme-emision-contrato.md)) y la
-  previsualización está verificada en vivo, pero no hay ninguna emisión confirmada: la
-  respuesta de `mipeSendXML.cgi` no está relevada. Por eso el éxito **no** se lee de esa
-  respuesta: tras enviar se busca la fila nueva en el historial de emitidos, y de ahí salen el
-  folio real y el `codigo`. Si la fila no aparece, la tool falla con `EmisionIncierta` en vez
-  de afirmar que emitió. La primera emisión real conviene hacerla por un monto mínimo y
-  anularla con nota de crédito.
+- **La emisión está verificada contra el SII real** (2026-11-23: 33 facturas afectas, varias
+  con más de una línea y descripción extendida). Lo que hubo que relevar para llegar ahí:
+  - El POST a `postFirmaDigital.cgi` va en **UTF-8**, como lo hace el JS del portal. En
+    latin1 el SII firma "OPERACI?N" en vez de "OPERACIÓN" y `mipeSendXML.cgi` responde
+    «Firma no reconocida!». La firma ahora se rechaza localmente si perdió caracteres.
+  - El envío lleva también los campos de la firma centralizada (`nombre`, `clave`, `nodo`,
+    `nodoId`, `nameSpace`) y el XML va con el comentario `<!-- O … central VERSION: … -->`
+    delante de `<Documento>`, igual que `pluginsii-1.2.js`.
+  - La página de **éxito** de `mipeSendXML.cgi` también trae un `alert()`
+    (`'pagina sendXML_PLantilla.html'`). Sólo «Firma no reconocida» y «Error al enviar»
+    cuentan como rechazo; ante cualquier otro alert decide el historial de emitidos, y si la
+    fila no aparece la emisión queda `EmisionIncierta` con el texto del alert en el mensaje.
+  - El filtro de fechas del historial va en `AAAA-MM-DD`. Con `DD/MM/AAAA` el CGI responde su
+    página genérica «Por el momento no se puede responder», que parece una caída.
+  - El PDF de un emitido sale de `mipeDisplayPDF.cgi?DHDR_CODIGO=` (el de un recibido, de
+    `mipeShowPdf.cgi?CODIGO=`).
+- **El SII rechaza envíos muy seguidos y consume el folio igual.** Con segundos de diferencia
+  falla uno de cada dos («Por el momento no es posible responder su requerimiento»); con un
+  minuto entre envíos no falló ninguno. Ver «Ritmo» en la sección del lote.
 - **`sii_dte_*` y `sii_rcv_*` no son comparables.** Responden preguntas distintas y sus
   cifras no cuadran: Consultas DTE incluye guías de despacho, clasifica las facturas de
   compra del lado emitido, y sus recibidos difieren de los del RCV. Ninguno está mal.
@@ -625,7 +635,10 @@ npm run facturar -- estado                       # registro local de emisiones
 npm run facturar -- pdf <codigo>                 # baja el PDF de un emitido
 ```
 
-El CSV lleva una fila por documento (una línea de detalle). Hay un ejemplo en
+El CSV lleva una fila por **línea de detalle**. Un documento de varias líneas son filas
+**seguidas** con la misma `clave` y los mismos datos de receptor, tipo, fecha, forma de pago y
+referencia (sólo cambian `item`, `descripcion`, `neto` y `cantidad`); si no coinciden, o una
+fila repite una línea ya leída, el lote no se procesa. Hay un ejemplo en
 [`docs/ejemplos/lote-facturas.csv`](docs/ejemplos/lote-facturas.csv):
 
 | Columna | |
@@ -637,6 +650,7 @@ El CSV lleva una fila por documento (una línea de detalle). Hay un ejemplo en
 | `descripcion` | Opcional. Glosa extendida, hasta 1000 caracteres |
 | `neto` | Monto sin IVA, entero |
 | `tipo_dte`, `cantidad`, `fecha_emision`, `forma_pago` | Opcionales: 33, 1, hoy y crédito por defecto |
+| `ciudad_emisor` | Opcional. Hace falta si el portal no tiene la ciudad del emisor (el SII lo rechaza sin ella) |
 | `ref_tipo_doc`, `ref_folio`, `ref_fecha`, `ref_razon`, `ref_codigo` | Referencia; obligatoria en nota de crédito (61) |
 
 Los archivos `*.lote.csv` y la carpeta `emisiones/` están en `.gitignore`: son datos
@@ -660,9 +674,24 @@ npm run facturar -- resolver <clave> emitido --folio 123 --codigo 987654   # sí
 npm run facturar -- resolver <clave> descartar                             # no salió
 ```
 
-**La descripción extendida no está relevada en vivo.** Se envía como lo hace el formulario
-(`DESCRIP_nn` + `EFXP_DSC_ITEM_nn`) y se comprueba en la previsualización que el SII la
-conservó: si no, falla ahí, antes de firmar. `preview` alcanza para saber si funciona.
+**La descripción extendida** se envía como lo hace el formulario (`DESCRIP_nn` +
+`EFXP_DSC_ITEM_nn`), se comprueba en la previsualización que el SII la conservó y está
+verificada en documentos emitidos.
+
+**Ritmo y sesiones.** Emitir el lote entero de una corrida manda los envíos con segundos de
+diferencia, y el SII rechaza la mitad (cada rechazo queda `EmisionIncierta` y detiene el lote).
+Lo que funciona es de a uno con una pausa de un minuto:
+
+```bash
+for c in $(cut -d, -f1 lote.csv | tail -n +2 | uniq); do
+  npm run facturar -- emitir lote.csv --confirmar --solo "$c" || break
+  sleep 60
+done
+```
+
+Cada corrida cierra su sesión en el SII al terminar. El SII limita las sesiones simultáneas
+por RUT (`SESIONES_SIMULTANEAS`), y la de la persona en el navegador también cuenta: mientras
+corre el lote, conviene no estar dentro del portal.
 
 ## Adaptador REST: contrato de errores
 

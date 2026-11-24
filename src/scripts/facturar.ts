@@ -2,6 +2,7 @@ import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';
 import { crearRegistroSesionesSii } from '../registroSesionesSii';
+import { cerrarSesionSii } from '../cerrarSesionSii';
 import { ProveedorCredencialesRuntime } from '../credencialesRuntime';
 import { SiiHttpClient } from '../http';
 import {
@@ -82,7 +83,19 @@ function sesiones(perfilPedido?: string) {
   const registro = crearRegistroSesionesSii(cred);
   const conScraper = <R>(fn: (s: MipymeHttpScraper) => Promise<R>): Promise<R> =>
     registro.ejecutar(p.rut, async sesion => fn(new MipymeHttpScraper(new SiiHttpClient(sesion), sesion)));
+  // Cada corrida abre su propia sesión en el SII. Sin cerrarla, unas pocas
+  // corridas seguidas agotan el límite del RUT y el login siguiente falla con
+  // SESIONES_SIMULTANEAS — también para la persona en el navegador.
+  cierresPendientes.push(() => registro.cerrarYOlvidar(p.rut, cerrarSesionSii));
   return { rut: p.rut, conScraper };
+}
+
+const cierresPendientes: (() => Promise<void>)[] = [];
+
+async function cerrarSesiones(): Promise<void> {
+  for (const cerrar of cierresPendientes.splice(0)) {
+    try { await cerrar(); } catch (e) { console.error(`(no se pudo cerrar la sesión SII: ${e instanceof Error ? e.message : String(e)})`); }
+  }
 }
 
 function cargarLote(ruta: string | undefined, empresa: string | undefined, solo?: string): DocumentoLote[] {
@@ -140,7 +153,7 @@ async function main() {
     const [codigo] = posicionales;
     if (!codigo) throw new Error('Uso: pdf <codigo> [-o archivo.pdf]');
     const { conScraper } = sesiones(opciones.perfil as string | undefined);
-    const pdf = await conScraper(s => s.dtePdf(codigo, empresa));
+    const pdf = await conScraper(s => s.dtePdf(codigo, empresa, 'emitido'));
     const destino = (opciones.o as string | undefined) ?? path.join(dir, 'pdf', `dte-${codigo}.pdf`);
     fs.mkdirSync(path.dirname(destino), { recursive: true });
     fs.writeFileSync(destino, pdf);
@@ -154,7 +167,7 @@ async function main() {
     console.log(`Firmando (SIN emitir) el documento "${docs[0].clave}" como ${rut}...`);
     const r = await conScraper(s => s.verificarFirma(docs[0].params));
     console.log(`${r.firmaValida ? 'OK' : 'FALLÓ'}: ${r.detalle}`);
-    if (!r.firmaValida) process.exit(1);
+    if (!r.firmaValida) await salir(1);
     return;
   }
 
@@ -171,7 +184,9 @@ async function main() {
         console.log(
           `OK    ${d.clave}  tipo ${r.resumen.tipoDte}  ${r.resumen.receptorRut} ${r.resumen.receptorRazonSocial}\n` +
           `      fecha ${r.resumen.fechaEmision}  neto ${pesos(r.resumen.neto)}  IVA ${pesos(r.resumen.iva)}  total ${pesos(r.resumen.total)}\n` +
-          `      ${d.params.lineas[0].nombre}${d.params.lineas[0].descripcion ? ` | ${d.params.lineas[0].descripcion}` : ''}` +
+          d.params.lineas.map(l =>
+            `      ${l.nombre}${l.descripcion ? ` | ${l.descripcion}` : ''}  ${l.cantidad} x ${pesos(l.precioUnitario)}`
+          ).join('\n') +
           `${ya ? `\n      OJO: en el registro local figura como "${ya.estado}"${ya.folio ? ` (folio ${ya.folio})` : ''}` : ''}`
         );
       } catch (e) {
@@ -180,7 +195,7 @@ async function main() {
       }
     }
     console.log(`\n${docs.length - fallas} de ${docs.length} documentos listos. Neto ${pesos(neto)}, IVA ${pesos(iva)}, total ${pesos(total)}.`);
-    if (fallas > 0) process.exit(1);
+    if (fallas > 0) await salir(1);
     return;
   }
 
@@ -188,7 +203,7 @@ async function main() {
     const docs = cargarLote(posicionales[0], empresa, opciones.solo as string | undefined);
     if (!opciones.confirmar) {
       console.log(`Esto EMITIRÍA ${docs.length} documento(s) tributario(s) reales e irreversibles. Corré primero "preview" y después repetí con --confirmar.`);
-      process.exit(1);
+      await salir(1);
     }
     const { conScraper } = sesiones(opciones.perfil as string | undefined);
     const permitirDuplicado = opciones['permitir-duplicado'] === true;
@@ -214,7 +229,7 @@ async function main() {
         const entrada = registro.obtener(d.clave)!;
         if (!entrada.pdf && entrada.codigo) {
           try {
-            const pdf = await conScraper(s => s.dtePdf(entrada.codigo!, empresa));
+            const pdf = await conScraper(s => s.dtePdf(entrada.codigo!, empresa, 'emitido'));
             const destino = path.join(dir, 'pdf', `${d.params.tipoDte}-${entrada.folio}-${d.params.receptor.rut}-${d.params.receptor.dv}.pdf`);
             fs.mkdirSync(path.dirname(destino), { recursive: true });
             fs.writeFileSync(destino, pdf);
@@ -231,19 +246,28 @@ async function main() {
           // desconocido es cómo se termina con duplicados.
           console.error(`\nDETENIDO en ${d.clave}: ${msg}`);
           console.error(`Emitidos ${emitidos}, ya emitidos ${saltados}, fallidos ${fallas}. El resto del lote NO se procesó.`);
-          process.exit(2);
+          await salir(2);
         }
         fallas++;
         console.log(`${e instanceof DteDuplicadoProbable ? 'DUPL ' : 'ERROR'} ${d.clave}: ${msg}`);
       }
     }
     console.log(`\nEmitidos ${emitidos}, ya emitidos ${saltados}, fallidos ${fallas} (los fallidos NO se emitieron).`);
-    if (fallas > 0) process.exit(1);
+    if (fallas > 0) await salir(1);
     return;
   }
 
   console.log('Comandos: verificar-firma <lote.csv> | preview <lote.csv> | emitir <lote.csv> --confirmar | pdf <codigo> | estado | resolver <clave> ...');
-  process.exit(comando ? 1 : 0);
+  await salir(comando ? 1 : 0);
 }
 
-if (require.main === module) main().catch(e => { console.error('ERROR:', e?.constructor?.name, '-', e?.message ?? e); process.exit(1); });
+async function salir(codigo: number): Promise<never> {
+  await cerrarSesiones();
+  process.exit(codigo);
+}
+
+if (require.main === module) {
+  main()
+    .then(() => cerrarSesiones())
+    .catch(async e => { console.error('ERROR:', e?.constructor?.name, '-', e?.message ?? e); await salir(1); });
+}
