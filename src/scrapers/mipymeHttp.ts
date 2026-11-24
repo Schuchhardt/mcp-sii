@@ -156,6 +156,7 @@ const HISTORIAL_RECIBIDOS_URL = `${CGI_BASE}/mipeAdminDocsRcp.cgi`;
 // documento, y los dispara un reCAPTCHA (`llamaRecaptchaConCallback`), o sea que
 // no son un camino que un servicio pueda recorrer solo.
 const PDF_DOCUMENTO_URL = `${CGI_BASE}/mipeShowPdf.cgi`;
+const PDF_EMITIDO_URL = `${CGI_BASE}/mipeDisplayPDF.cgi`;
 
 // Respaldo XML de los DTE ("Respaldo de DTE y/o IECV" → "Descargar información
 // electrónica" en el menú del portal). Relevado en vivo el 2026-09-02.
@@ -463,6 +464,23 @@ const SEND_XML_URL = `${CGI_BASE}/mipeSendXML.cgi`;
 // (43) y las exportaciones (110-112) usan otros nodos, y es una razón más para
 // no emitirlas sin relevarlas.
 const NODO_FIRMA_DTE = { nodo: 'dte:DTE', nodoId: 'dte:Documento', nameSpace: 'http://www.sii.cl/SiiDte' };
+
+// Comentario que `signXmlCompatible` (pluginsii-1.2.js, VERSION v20190409)
+// inserta delante de <Documento> antes de firmar, sólo si no está ya:
+//   <!-- O {navigator.platform} {navegador} {versión} central VERSION: v20190409 -->
+// Se usa el de un Chrome de escritorio, que es el navegador con el que el
+// portal activa la firma centralizada sin plug-in.
+// Alerts de mipeSendXML que SÍ significan que el documento no se emitió.
+// Relevados: «Firma no reconocida!» (2026-11-23, sin folio en el historial) y
+// «Error al enviar el documento». Cualquier otro alert no prueba nada.
+const RECHAZOS_ENVIO = /firma no reconocida|error al enviar/i;
+
+const COMENTARIO_FIRMA_CENTRAL = '<!-- O MacIntel Chrome 158 central VERSION: v20190409 -->';
+
+export function conComentarioFirma(xml: string): string {
+  if (xml.includes('<!-- O ') || !xml.includes('<Documento ')) return xml;
+  return xml.replace('<Documento ', `${COMENTARIO_FIRMA_CENTRAL}\n<Documento `);
+}
 
 const TASA_IVA = 0.19;
 
@@ -1091,8 +1109,14 @@ export class MipymeHttpScraper {
    * folio se repite entre emisores y entre tipos de documento, así que no
    * identifica nada por sí solo. Es el mismo criterio que el PDF de BHE, que va
    * por código de barras y no por folio.
+   *
+   * Cada lado tiene su CGI: los recibidos salen de `mipeShowPdf.cgi?CODIGO=`
+   * y los EMITIDOS de `mipeDisplayPDF.cgi?DHDR_CODIGO=` (relevado el
+   * 2026-11-23 desde la descarga del navegador, folio 42). Pedir un emitido al
+   * CGI de recibidos no falla con un error claro: responde la página genérica
+   * «Por el momento no se puede responder», que parece una caída.
    */
-  async dtePdf(codigo: string, empresaRut?: string): Promise<Buffer> {
+  async dtePdf(codigo: string, empresaRut?: string, origen: 'emitido' | 'recibido' = 'recibido'): Promise<Buffer> {
     if (!/^\d+$/.test(codigo.trim())) {
       throw new Error(
         `El codigo del documento tiene que ser el que devuelve el listado del portal `
@@ -1108,8 +1132,9 @@ export class MipymeHttpScraper {
       // cuando lo que falta es el contexto de empresa.
       await this.http.postForm(SEL_EMPRESA_URL, { RUT_EMP: resuelta });
 
-      const { contenido, contentType } = await this.http.getBinario(
-        PDF_DOCUMENTO_URL, { CODIGO: codigo.trim() });
+      const { contenido, contentType } = origen === 'emitido'
+        ? await this.http.getBinario(PDF_EMITIDO_URL, { DHDR_CODIGO: codigo.trim() })
+        : await this.http.getBinario(PDF_DOCUMENTO_URL, { CODIGO: codigo.trim() });
 
       // El CGI responde 200 con HTML cuando algo falla, así que el status no
       // distingue nada: lo que separa un PDF de un error es el Content-Type. Sin
@@ -2964,7 +2989,7 @@ export class MipymeHttpScraper {
     resumen: ResumenDte,
     codigosPrevios: Set<string>
   ): Promise<{ folio: number; codigo: string; folioPropuesto: number }> {
-    const { campos, firmado, folio } = await this.firmar(firmaHtml);
+    const { campos, camposFirmaCentral, firmado, folio } = await this.firmar(firmaHtml);
     if (!firmado.ok) {
       throw new Error(
         `El SII no firmó el documento. Respondió: ${firmado.detalle}. ` +
@@ -2978,7 +3003,11 @@ export class MipymeHttpScraper {
     try {
       envio = await this.http.postForm(
         SEND_XML_URL,
-        { ...campos, txtSignText: firmado.xml },
+        // Los campos de la firma centralizada viajan TAMBIÉN al envío: en el
+        // portal, `firmaCertCentralizado` (pluginsii-1.2.js) los inserta como
+        // <input hidden> dentro de frmSign, antes de txtPlainText. Sin ellos
+        // mipeSendXML responde «Firma no reconocida!» (relevado 2026-11-23).
+        { ...campos, ...camposFirmaCentral, txtSignText: firmado.xml },
         { charset: 'latin1' }
       );
     } catch (e) {
@@ -3014,9 +3043,16 @@ export class MipymeHttpScraper {
         await esperar(this.pausaVerificacionMs);
       }
     }
+    // Lo que dijo el envío va en el mensaje: sin eso, un incierto no se puede
+    // diagnosticar (¿éxito con demora del historial o un rechazo desconocido?).
+    const alertaEnvio = /alert\s*\(\s*'((?:[^'\\]|\\.)*)'\s*\)/i.exec(envio)?.[1];
+    const textoEnvio = alertaEnvio
+      ? `alert '${decodificarEntidades(alertaEnvio.replace(/\\n/g, ' ').trim()).slice(0, 200)}'`
+      : `"${envio.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)}"`;
     throw new EmisionIncierta(
       `El portal aceptó el envío pero el documento no aparece en el historial tras ` +
       `${INTENTOS_VERIFICACION} consultas (${ultimoError}). Folio propuesto ${folio}. ` +
+      `Respuesta del envío: ${textoEnvio}. ` +
       'NO reintentar: revisar el historial de emitidos del portal.',
       folio
     );
@@ -3027,6 +3063,7 @@ export class MipymeHttpScraper {
   // verde sobre un camino distinto del que emite, que es peor que no tenerla.
   private async firmar(firmaHtml: string): Promise<{
     campos: Record<string, string>;
+    camposFirmaCentral: Record<string, string>;
     folio: number;
     certId: string;
     firmado: { ok: boolean; xml: string; detalle: string };
@@ -3052,20 +3089,46 @@ export class MipymeHttpScraper {
 
     // El SII firma el XML con el certificado que el contribuyente le tiene
     // cargado. La clave sale del entorno, nunca de los parámetros de la tool.
+    //
+    // UTF-8 y no latin1: en el portal este POST lo hace el JS del navegador
+    // (`llamaFirma`), que codifica en UTF-8 aunque la página sea ISO-8859-1. Con
+    // latin1 el CGI recibe `%D3` por "Ó", no lo entiende como UTF-8 y firma
+    // "OPERACI?N": la firma sale válida pero sobre otro texto, y mipeSendXML la
+    // rechaza con «Firma no reconocida!». Relevado el 2026-11-23 con el giro
+    // del emisor ("DESARROLLO Y OPERACIÓN ..."). La respuesta sí viene en
+    // ISO-8859-1 y el envío posterior sigue en latin1, como el formulario.
+    // El portal firma el XML con un comentario delante de <Documento> que dice
+    // con qué se firmó ("central" = certificado centralizado). Se replica tal
+    // cual lo arma `signXmlCompatible` en pluginsii-1.2.js (v20190409).
+    const dato = conComentarioFirma(xml);
     const respuesta = await this.http.postForm(
       FIRMA_DIGITAL_URL,
-      { nombre: certId, dato: xml, rut, dv, clave, ...NODO_FIRMA_DTE },
-      { charset: 'latin1' }
+      { nombre: certId, dato, rut, dv, clave, ...NODO_FIRMA_DTE },
+      { charset: 'utf-8' }
     );
 
     // El endpoint devuelve el XML firmado; cualquier otra cosa es un rechazo, y
     // enviarla igual mandaría basura al SII como documento tributario.
-    const ok = /<Signature|<DTE/i.test(respuesta);
+    const pareceFirmado = /<Signature|<DTE/i.test(respuesta);
+    // Y tiene que ser una firma sobre EL MISMO texto: si en el camino se
+    // perdió una tilde o una ñ, el SII rechaza el envío — o peor, firma un
+    // documento con datos alterados. Se compara la secuencia de caracteres no
+    // ASCII del documento antes y después de firmar.
+    const noAscii = (t: string) => (t.match(/[^\x00-\x7F]/g) ?? []).join('');
+    const sinFirma = respuesta.replace(/<Signature[\s\S]*<\/Signature>/i, '');
+    const conservaTexto = noAscii(xml) === noAscii(sinFirma);
+    const ok = pareceFirmado && conservaTexto;
+    const detalle = pareceFirmado && !conservaTexto
+      ? `el SII firmó un texto distinto al del documento: se perdieron caracteres no ASCII ` +
+        `(esperados "${noAscii(xml)}", firmados "${noAscii(sinFirma)}"). Es un problema de ` +
+        'codificación del POST a postFirmaDigital, no de la clave'
+      : respuesta.slice(0, 200);
     return {
       campos,
+      camposFirmaCentral: { nombre: certId, clave, ...NODO_FIRMA_DTE },
       folio: parseInt(folio, 10),
       certId,
-      firmado: { ok, xml: respuesta, detalle: respuesta.slice(0, 200) },
+      firmado: { ok, xml: respuesta, detalle },
     };
   }
 
@@ -3155,13 +3218,17 @@ export class MipymeHttpScraper {
     return certId;
   }
 
-  // El criterio de éxito del envío está fijado con lo que el portal responde
-  // cuando rechaza, que es lo mismo que en los otros pasos: una página con un
-  // alert(). Se prefiere fallar ante lo desconocido antes que dar por emitido un
-  // documento que no lo está — la lección del folio 21.
+  // Sólo se declara "no se emitió" ante un rechazo CONOCIDO. La página de ÉXITO
+  // del envío también trae un alert() — `alert('pagina sendXML_PLantilla.html')`,
+  // relevado el 2026-11-23 con el folio 42, que se emitió mientras esto decía
+  // "rechazó el envío". Tratar cualquier alert como rechazo convierte un éxito en
+  // un "NO se emitió" falso, que es la peor respuesta posible: invita a
+  // reintentar y duplicar. Ante un alert desconocido no se concluye nada acá: la
+  // verificación contra el historial decide, y si no aparece el documento la
+  // emisión queda INCIERTA y el lote se detiene.
   private assertEnvioAceptado(html: string): void {
     const alerta = /alert\s*\(\s*'((?:[^'\\]|\\.)*)'\s*\)/i.exec(html)?.[1];
-    if (alerta) {
+    if (alerta && RECHAZOS_ENVIO.test(alerta)) {
       throw new Error(
         `El SII rechazó el envío del documento: ${decodificarEntidades(alerta.replace(/\\n/g, ' ').trim())}.`
       );
@@ -3412,8 +3479,14 @@ export class MipymeHttpScraper {
       RUT_RECP: filtros.receptorRut ?? '',
       FOLIO: filtros.folio ? String(filtros.folio) : '',
       RZN_SOC: filtros.razonSocial ?? '',
-      FEC_DESDE: filtros.fechaDesde ? this.aFechaSii(filtros.fechaDesde) : '',
-      FEC_HASTA: filtros.fechaHasta ? this.aFechaSii(filtros.fechaHasta) : '',
+      // AAAA-MM-DD, tal cual: es lo que valida el formulario del historial
+      // (`validaStrFechaYYYYMMDD`, input type="date"). Con DD/MM/AAAA el CGI
+      // no avisa de formato: responde su página genérica «Por el momento no se
+      // puede responder a sus requerimientos», indistinguible de una caída, y
+      // eso bloqueaba la emisión (la foto del historial del día va con fecha).
+      // Relevado contra mipeAdminDocsEmi.cgi el 2026-11-23.
+      FEC_DESDE: filtros.fechaDesde ?? '',
+      FEC_HASTA: filtros.fechaHasta ?? '',
       TPO_DOC: filtros.tipoDte ? String(filtros.tipoDte) : '',
       ESTADO: '',
       ORDEN: '',

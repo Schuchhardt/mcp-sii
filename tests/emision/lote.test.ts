@@ -60,6 +60,49 @@ describe('leerLote', () => {
     expect(lote.errores[0].errores[0]).toMatch(/repetida/);
   });
 
+  it('filas seguidas con la misma clave son las líneas de UN documento', () => {
+    const lote = leerLote(
+      `${ENCABEZADO}\n` +
+      'k1,33,11111111-1,R,G,D,C,,DEPANDO ADMINISTRACION,COMISION OCTUBRE 2026 - DEPTO 301,67593\n' +
+      'k1,33,11111111-1,R,G,D,C,,DEPANDO ADMINISTRACION,COMISION OCTUBRE 2026 - DEPTO 801,156519\n' +
+      'k2,33,22222222-2,R2,G,D,C,,DEPANDO ADMINISTRACION,COMISION OCTUBRE 2026 - DEPTO 12,1000\n');
+
+    expect(lote.errores).toEqual([]);
+    expect(lote.documentos).toHaveLength(2);
+    expect(lote.documentos[0].params.lineas).toEqual([
+      { nombre: 'DEPANDO ADMINISTRACION', cantidad: 1, precioUnitario: 67593, descripcion: 'COMISION OCTUBRE 2026 - DEPTO 301' },
+      { nombre: 'DEPANDO ADMINISTRACION', cantidad: 1, precioUnitario: 156519, descripcion: 'COMISION OCTUBRE 2026 - DEPTO 801' },
+    ]);
+    expect(lote.documentos[1].params.lineas).toHaveLength(1);
+  });
+
+  it('lee ciudad_emisor', () => {
+    const lote = leerLote(`${ENCABEZADO},ciudad_emisor\nk1,33,11111111-1,R,G,D,C,,Item,,5000,SANTIAGO\n`);
+    expect(lote.documentos[0].params.ciudadEmisor).toBe('SANTIAGO');
+  });
+
+  it('una línea que no coincide en receptor con su documento es error', () => {
+    const lote = leerLote(
+      `${ENCABEZADO}\n` +
+      'k1,33,11111111-1,R,G,D,C,,Item,uno,1000\n' +
+      'k1,33,22222222-2,R,G,D,C,,Item,dos,2000\n');
+
+    expect(lote.documentos[0].params.lineas).toHaveLength(1);
+    expect(lote.errores[0]).toMatchObject({ fila: 3 });
+    expect(lote.errores[0].errores[0]).toMatch(/no coinciden/);
+  });
+
+  it('una clave que reaparece más abajo, no seguida, es error', () => {
+    const lote = leerLote(
+      `${ENCABEZADO}\n` +
+      'k1,33,11111111-1,R,G,D,C,,Item,uno,1000\n' +
+      'k2,33,22222222-2,R,G,D,C,,Item,otra,1000\n' +
+      'k1,33,11111111-1,R,G,D,C,,Item,dos,2000\n');
+
+    expect(lote.errores[0]).toMatchObject({ fila: 4 });
+    expect(lote.errores[0].errores[0]).toMatch(/repetida/);
+  });
+
   it('una nota de crédito sin referencia se rechaza', () => {
     const lote = leerLote(`${ENCABEZADO}\nk1,61,11111111-1,R,G,D,C,,Anula factura,,5000\n`);
     expect(lote.errores[0].errores.join(' ')).toMatch(/nota de crédito exige referencia/);

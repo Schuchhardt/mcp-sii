@@ -329,8 +329,9 @@ describe('MipymeHttpScraper.listDteEmitidos', () => {
     const [, params] = (http.get as jest.Mock).mock.calls[1];
     expect(params).toMatchObject({
       TPO_DOC: '33',
-      FEC_DESDE: '01/07/2026',
-      FEC_HASTA: '31/07/2026',
+      // AAAA-MM-DD: el formato que valida el formulario del portal.
+      FEC_DESDE: '2026-07-01',
+      FEC_HASTA: '2026-07-31',
       RUT_RECP: '44444444-4',
       FOLIO: '244',
       NUM_PAG: '2',

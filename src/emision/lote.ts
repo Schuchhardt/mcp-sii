@@ -1,7 +1,10 @@
 import { EmitirDteParams, MAX_DESCRIPCION_ITEM } from '../scrapers/mipymeHttp';
 import { rutEsValido } from '../rut';
 
-// Lote de documentos desde un CSV: una fila = un documento de una línea.
+// Lote de documentos desde un CSV: una fila = una línea de detalle. Un documento
+// de varias líneas son filas SEGUIDAS con la misma clave y los mismos datos de
+// receptor, tipo, fecha, forma de pago y referencia; sólo cambian item,
+// descripcion, neto y cantidad.
 //
 // Columnas (encabezado obligatorio, en cualquier orden; separador `,` o `;`):
 //
@@ -16,6 +19,7 @@ import { rutEsValido } from '../rut';
 //   cantidad         opcional, default 1
 //   fecha_emision    opcional, AAAA-MM-DD
 //   forma_pago       opcional: 1 contado, 2 crédito, 3 sin costo
+//   ciudad_emisor    opcional; necesaria si el portal no tiene la ciudad del emisor
 //   ref_tipo_doc, ref_folio, ref_fecha, ref_razon, ref_codigo
 //                    referencia; obligatoria en nota de crédito (61)
 
@@ -82,6 +86,7 @@ export function leerLote(texto: string): Lote {
   const documentos: DocumentoLote[] = [];
   const errores: ErrorLote[] = [];
   const clavesVistas = new Set<string>();
+  let ultimaClave: string | undefined;
 
   filas.slice(1).forEach((valores, i) => {
     const fila = i + 2; // 1 = encabezado
@@ -91,8 +96,6 @@ export function leerLote(texto: string): Lote {
     OBLIGATORIAS.forEach(exigir);
 
     const clave = v('clave');
-    if (clave && clavesVistas.has(clave)) errs.push(`la clave "${clave}" está repetida en el lote`);
-    clavesVistas.add(clave);
 
     const tipoDte = v('tipo_dte') ? Number(v('tipo_dte')) : 33;
     if (![33, 34, 61].includes(tipoDte)) errs.push(`tipo_dte ${v('tipo_dte')} no soportado (33, 34 o 61)`);
@@ -128,22 +131,43 @@ export function leerLote(texto: string): Lote {
       errs.push('una nota de crédito exige referencia (ref_tipo_doc, ref_folio, ref_fecha, ref_codigo)');
     }
 
+    const linea = { nombre: v('item'), cantidad, precioUnitario: neto, descripcion: v('descripcion') || undefined };
+    const params: EmitirDteParams = {
+      tipoDte,
+      receptor: {
+        rut, dv, razonSocial: v('razon_social'), giro: v('giro'), direccion: v('direccion'),
+        comuna: v('comuna'), ciudad: v('ciudad') || v('comuna'),
+      },
+      lineas: [linea],
+      formaPago: formaPago as 1 | 2 | 3 | undefined,
+      fechaEmision: v('fecha_emision') || undefined,
+      ciudadEmisor: v('ciudad_emisor') || undefined,
+      referencias,
+    };
+
+    // Varias líneas en un documento: filas CONSECUTIVAS con la misma clave.
+    // Todo lo que no es la línea tiene que coincidir — si no, son dos
+    // documentos con la clave equivocada. Una fila idéntica a una línea ya
+    // leída, o una clave que reaparece más abajo, sigue siendo error: lo más
+    // probable es la misma factura dos veces.
+    const previo = documentos[documentos.length - 1];
+    const continua = previo !== undefined && previo.clave === clave && ultimaClave === clave;
+    if (clave && clavesVistas.has(clave) && !continua) {
+      errs.push(`la clave "${clave}" está repetida en el lote (las líneas de un mismo documento van en filas seguidas)`);
+    } else if (continua && errs.length === 0) {
+      if (JSON.stringify({ ...previo.params, lineas: [] }) !== JSON.stringify({ ...params, lineas: [] })) {
+        errs.push(`la fila sigue al documento "${clave}" pero sus datos (receptor, tipo, fecha, forma de pago o referencia) no coinciden con los de la fila ${previo.fila}`);
+      } else if (previo.params.lineas.some(l => JSON.stringify(l) === JSON.stringify(linea))) {
+        errs.push(`la clave "${clave}" está repetida en el lote con la misma línea: sería la misma factura dos veces`);
+      }
+    }
+    clavesVistas.add(clave);
+    ultimaClave = clave;
+
     if (errs.length > 0) { errores.push({ fila, clave: clave || undefined, errores: errs }); return; }
 
-    documentos.push({
-      fila, clave,
-      params: {
-        tipoDte,
-        receptor: {
-          rut, dv, razonSocial: v('razon_social'), giro: v('giro'), direccion: v('direccion'),
-          comuna: v('comuna'), ciudad: v('ciudad') || v('comuna'),
-        },
-        lineas: [{ nombre: v('item'), cantidad, precioUnitario: neto, descripcion: v('descripcion') || undefined }],
-        formaPago: formaPago as 1 | 2 | 3 | undefined,
-        fechaEmision: v('fecha_emision') || undefined,
-        referencias,
-      },
-    });
+    if (continua) previo.params.lineas.push(linea);
+    else documentos.push({ fila, clave, params });
   });
 
   return { documentos, errores };

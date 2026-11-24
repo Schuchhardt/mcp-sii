@@ -234,6 +234,16 @@ describe('MipymeHttpScraper.dtePdf', () => {
   // Sale de mipeShowPdf.cgi y NO de mipeDownLoad/mipeImprimeDocAdm, que bajan el
   // lote entero según los filtros de la pantalla y encima los dispara un
   // reCAPTCHA: no son un camino que un servicio pueda recorrer solo.
+  it('el PDF de un EMITIDO sale de mipeDisplayPDF.cgi con DHDR_CODIGO', async () => {
+    // Relevado desde la descarga del navegador (folio 42, 2026-11-23).
+    const { scraper, http } = conPdf(PDF);
+
+    await scraper.dtePdf('2924566111', '33333333-3', 'emitido');
+
+    expect(http.getBinario).toHaveBeenCalledWith(
+      expect.stringContaining('mipeDisplayPDF.cgi'), { DHDR_CODIGO: '2924566111' });
+  });
+
   it('pide el PDF a mipeShowPdf.cgi con el CODIGO', async () => {
     const { scraper, http } = conPdf(PDF);
 
